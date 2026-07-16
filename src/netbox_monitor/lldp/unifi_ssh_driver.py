@@ -48,6 +48,9 @@ def parse_lldpcli_json(payload: str) -> list[LldpNeighbor]:
             continue
         sysname = None
         chassis_mac = None
+        mgmt_ip = None
+        caps: set[str] = set()
+        sys_descr = None
         chassis = detail.get("chassis") or {}
         if isinstance(chassis, dict):
             # either {"<sysname>": {...}} or a flat {"id": ..., "name": ...}
@@ -63,6 +66,18 @@ def parse_lldpcli_json(payload: str) -> list[LldpNeighbor]:
                         chassis_mac = normalize_mac(str(cid.get("value", "")))
                     if not sysname and isinstance(body.get("name"), str):
                         sysname = body["name"]
+                    descr = body.get("descr")
+                    if isinstance(descr, str):
+                        sys_descr = descr
+                    mgmt = _first(body.get("mgmt-ip"))
+                    if isinstance(mgmt, dict):
+                        mgmt = mgmt.get("value")
+                    if isinstance(mgmt, str) and "." in mgmt:
+                        mgmt_ip = mgmt
+                    for cap in body.get("capability") or []:
+                        if isinstance(cap, dict) and cap.get("enabled") in (True, "on", "yes"):
+                            ctype = str(cap.get("type", "")).lower()
+                            caps.add("bridge" if ctype == "bridge" else ctype)
                 break
 
         remote_port = None
@@ -85,6 +100,9 @@ def parse_lldpcli_json(payload: str) -> list[LldpNeighbor]:
                 sysname=sysname,
                 remote_port=remote_port,
                 remote_port_is_mac=remote_port_is_mac,
+                mgmt_ip=mgmt_ip,
+                capabilities=caps,
+                sys_descr=sys_descr,
             )
         )
     return neighbors

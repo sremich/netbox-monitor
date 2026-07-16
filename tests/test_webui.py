@@ -85,6 +85,39 @@ def test_settings_updates_intervals(client, store):
     assert config.lldp.enabled is True
 
 
+def test_settings_lldp_credential_profiles(client, store):
+    login(client)
+    base = {"log_level": "INFO", "stale_after": "600"}
+    for module in ("dhcp", "dns", "discovery", "availability", "proxmox", "lldp", "certs"):
+        base[f"interval_{module}"] = "300"
+    # add two credential profiles + a blank row
+    base["cred_name"] = ["homelab-ssh", "corp-snmp", ""]
+    base["cred_driver"] = ["mikrotik", "snmp", "auto"]
+    base["cred_username"] = ["admin", "", ""]
+    base["cred_password"] = ["secret", "", ""]
+    base["cred_community"] = ["", "public", ""]
+    base["lldp_crawl_enabled"] = "on"
+    base["lldp_max_switches"] = "50"
+    base["lldp_max_depth"] = "5"
+    assert client.post("/settings", data=base).status_code == 200
+    lldp = store.get().lldp
+    assert lldp.crawl_enabled is True
+    assert lldp.max_switches == 50 and lldp.max_depth == 5
+    assert [c.name for c in lldp.credentials] == ["homelab-ssh", "corp-snmp"]
+    assert lldp.credentials[0].driver == "mikrotik"
+    assert lldp.credentials[0].password == "secret"
+    assert lldp.credentials[1].snmp_community == "public"
+
+    # editing with a blank password keeps the stored one
+    base["cred_name"] = ["homelab-ssh"]
+    base["cred_driver"] = ["mikrotik"]
+    base["cred_username"] = ["admin"]
+    base["cred_password"] = [""]
+    base["cred_community"] = [""]
+    assert client.post("/settings", data=base).status_code == 200
+    assert store.get().lldp.credentials[0].password == "secret"
+
+
 def test_site_crud(client, store):
     login(client)
     response = client.post(

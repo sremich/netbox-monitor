@@ -1,16 +1,24 @@
-"""Per-site LLDP: switches are selected by site, credentials resolve
-netbox-secrets -> site -> global fallback."""
+"""Per-site LLDP credential resolution and site scoping, exercised through the
+crawl's unified registry.collect() call."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
-from netbox_monitor.config import LldpFallbackCred, SiteLldpConfig
+import pytest
+
+from netbox_monitor.config import LldpCredential, SiteLldpConfig
+from netbox_monitor.sync import lldp as lldp_mod
 from netbox_monitor.sync.lldp import LldpSync
 
 
-def make_switch(nb, name, site_id, platform_slug, ip):
-    from types import SimpleNamespace
+@pytest.fixture(autouse=True)
+def _switch_role(nb):
+    role = nb.api.dcim.device_roles.create(name="Switch", slug="switch")
+    nb.refs["role_switch"] = role.id
+    return nb
 
+
+def make_switch(nb, name, site_id, platform_slug, ip):
     tag = nb.api.extras.tags.get(slug="lldp-source") or nb.api.extras.tags.create(
         name="lldp-source", slug="lldp-source"
     )
@@ -23,59 +31,67 @@ def make_switch(nb, name, site_id, platform_slug, ip):
     )
 
 
-def test_site_lldp_disabled_means_no_polling(ctx):
+def capture_collect(ctx):
+    """Run LldpSync, capturing every registry.collect(driver, host, **kw)."""
+    calls = []
+
+    async def fake_collect(driver, host, **kw):
+        calls.append((driver, host, kw))
+        return []
+
+    orig = lldp_mod.registry.collect
+    lldp_mod.registry.collect = fake_collect
+    try:
+        asyncio.run(LldpSync(ctx).run())
+    finally:
+        lldp_mod.registry.collect = orig
+    return calls
+
+
+def test_disabled_site_not_polled(ctx):
     ctx.config.lldp.enabled = False
     ctx.sites[0].config.lldp = SiteLldpConfig(enabled=False)
     make_switch(ctx.netbox, "sw1", ctx.netbox.home_site_id, "unifi", "10.0.0.5")
-    sync = LldpSync(ctx)
-    with patch("netbox_monitor.sync.lldp.unifi_ssh_driver") as ssh:
-        asyncio.run(sync.run())
-        ssh.collect.assert_not_called()
+    assert capture_collect(ctx) == []
 
 
-def test_site_credentials_used_for_unifi(ctx):
+def test_site_ssh_credentials_used(ctx):
     ctx.sites[0].config.lldp = SiteLldpConfig(
         enabled=True, ssh_username="siteadmin", ssh_password="sitepass"
     )
     make_switch(ctx.netbox, "sw1", ctx.netbox.home_site_id, "unifi", "10.0.0.5")
-    sync = LldpSync(ctx)
-    with patch(
-        "netbox_monitor.sync.lldp.unifi_ssh_driver.collect", new=AsyncMock(return_value=[])
-    ) as collect:
-        asyncio.run(sync.run())
-        collect.assert_awaited_once_with("10.0.0.5", "siteadmin", "sitepass")
+    calls = capture_collect(ctx)
+    # first attempt uses the unifi driver (platform hint) with the site SSH creds
+    driver, host, kw = calls[0]
+    assert host == "10.0.0.5"
+    assert driver == "unifi"
+    assert kw["username"] == "siteadmin" and kw["password"] == "sitepass"
 
 
 def test_site_snmp_community_used(ctx):
     ctx.sites[0].config.lldp = SiteLldpConfig(enabled=True, snmp_community="sitecomm")
-    make_switch(ctx.netbox, "sw2", ctx.netbox.home_site_id, "edgeswitch", "10.0.0.6")
-    sync = LldpSync(ctx)
-    with patch(
-        "netbox_monitor.sync.lldp.snmp_driver.collect", new=AsyncMock(return_value=[])
-    ) as collect:
-        asyncio.run(sync.run())
-        collect.assert_awaited_once_with("10.0.0.6", "sitecomm")
+    make_switch(ctx.netbox, "sw2", ctx.netbox.home_site_id, "generic", "10.0.0.6")
+    calls = capture_collect(ctx)
+    drivers = {d for d, _h, _k in calls}
+    assert "snmp" in drivers
+    snmp_call = next(c for c in calls if c[0] == "snmp")
+    assert snmp_call[2]["snmp_community"] == "sitecomm"
 
 
-def test_global_fallback_when_site_has_no_creds(ctx):
-    ctx.sites[0].config.lldp = SiteLldpConfig(enabled=True)
-    ctx.config.lldp.fallback_creds = {"edgeswitch": LldpFallbackCred(community="globalcomm")}
-    make_switch(ctx.netbox, "sw3", ctx.netbox.home_site_id, "edgeswitch", "10.0.0.7")
-    sync = LldpSync(ctx)
-    with patch(
-        "netbox_monitor.sync.lldp.snmp_driver.collect", new=AsyncMock(return_value=[])
-    ) as collect:
-        asyncio.run(sync.run())
-        collect.assert_awaited_once_with("10.0.0.7", "globalcomm")
+def test_global_credential_profiles_tried(ctx):
+    ctx.sites[0].config.lldp = SiteLldpConfig(enabled=True)  # no site creds
+    ctx.config.lldp.credentials = [
+        LldpCredential(name="corp-snmp", driver="snmp", snmp_community="globalcomm")
+    ]
+    make_switch(ctx.netbox, "sw3", ctx.netbox.home_site_id, "generic", "10.0.0.7")
+    calls = capture_collect(ctx)
+    snmp_call = next(c for c in calls if c[0] == "snmp")
+    assert snmp_call[2]["snmp_community"] == "globalcomm"
 
 
 def test_other_sites_switches_not_polled(ctx):
     ctx.sites[0].config.lldp = SiteLldpConfig(enabled=True, snmp_community="c")
-    other_site = ctx.netbox.api.dcim.sites.create(name="Elsewhere", slug="elsewhere")
-    make_switch(ctx.netbox, "far-switch", other_site.id, "edgeswitch", "10.9.9.9")
-    sync = LldpSync(ctx)
-    with patch(
-        "netbox_monitor.sync.lldp.snmp_driver.collect", new=AsyncMock(return_value=[])
-    ) as collect:
-        asyncio.run(sync.run())
-        collect.assert_not_awaited()
+    other = ctx.netbox.api.dcim.sites.create(name="Elsewhere", slug="elsewhere")
+    make_switch(ctx.netbox, "far-switch", other.id, "generic", "10.9.9.9")
+    calls = capture_collect(ctx)
+    assert "10.9.9.9" not in [h for _d, h, _k in calls]

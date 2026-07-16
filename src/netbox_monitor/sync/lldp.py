@@ -1,28 +1,81 @@
-"""LLDP topology sync: poll each site's switches tagged ``lldp-source`` and
-document neighbor relationships as NetBox cables tagged ``src:lldp``.
+"""LLDP topology sync with seed-and-crawl propagation.
 
-Credential resolution per switch: netbox-secrets plugin (when configured) →
-the site's LLDP credentials → global ``lldp.fallback_creds`` by platform.
+Per site, start from ``lldp-source``-tagged switches, poll their LLDP neighbors,
+document the links as NetBox cables, and — for neighbors that are themselves
+switches — auto-create them, authenticate with the site/global credential
+profiles, and crawl onward until the fabric is mapped (bounded by max_switches
+/max_depth).
+
+Credential resolution per switch: netbox-secrets plugin → site LLDP credentials
+→ global credential profiles. The working (driver, profile) is cached so later
+runs skip the trial loop.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from collections import deque
+from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
 
 from netbox_monitor.clients.netbox import MANAGED_TAG_SLUG, NetBoxClient, slugify
 from netbox_monitor.clients.secrets import DeviceSecrets, SecretsClient
-from netbox_monitor.config import LldpFallbackCred
+from netbox_monitor.config import LldpCredential
 from netbox_monitor.context import Context, ResolvedSite
-from netbox_monitor.lldp import LldpNeighbor, snmp_driver, unifi_ssh_driver
+from netbox_monitor.lldp import LldpNeighbor, registry
 from netbox_monitor.oui import normalize_mac
+from netbox_monitor.sync.common import ensure_discovered_device_type, now_iso, set_interface_mac
 
 log = structlog.get_logger(__name__)
 
 SRC = "src-lldp"
+
+_CONN_ERR_SIGNS = (
+    "reset",
+    "refused",
+    "timed out",
+    "timeout",
+    "unreachable",
+    "connection lost",
+    "not a valid",
+    "closed",
+    "no route",
+)
+
+
+def _is_connection_error(exc: Exception) -> bool:
+    """True when an SSH failure is transport-level (reset/refused/timeout) rather
+    than an authentication rejection — i.e. retrying other SSH creds won't help."""
+    import asyncssh
+
+    if isinstance(exc, asyncssh.PermissionDenied):
+        return False  # auth failure: a different credential might still work
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    text = str(exc).lower()
+    return any(sign in text for sign in _CONN_ERR_SIGNS)
+
+
+@dataclass
+class CrawlTarget:
+    host: str
+    device: Any | None  # NetBox device, if known
+    hint_driver: str | None
+    depth: int
+    sys_descr: str | None = None
+    chassis_mac: str | None = None
+
+
+@dataclass
+class SiteStats:
+    polled: int = 0
+    created: int = 0
+    failed: int = 0
+    failures: list[str] = field(default_factory=list)
 
 
 class LldpSync:
@@ -43,50 +96,25 @@ class LldpSync:
         enabled = [s for s in self.ctx.sites if s.config.lldp.enabled]
         if enabled:
             return enabled
-        # legacy behavior: global lldp.enabled with no per-site flags polls all sites
         return list(self.ctx.sites) if self.ctx.config.lldp.enabled else []
 
     async def run(self) -> None:
-        cfg = self.ctx.config.lldp
-        nb = self.ctx.netbox
-        tag_slug = slugify(cfg.source_tag)
         sites = self._enabled_sites()
         if not sites:
             log.info("no sites with LLDP enabled")
             return
-
         for site in sites:
             started = time.monotonic()
-            polled = failed = 0
             try:
-                switches = await asyncio.to_thread(
-                    nb.filter_tagged,
-                    nb.api.dcim.devices,
-                    tag_slug,
-                    site_id=site.netbox_site_id,
+                stats = await self._crawl_site(site)
+                ok = stats.failed == 0
+                message = f"{stats.polled} polled, {stats.created} switches created" + (
+                    f", {stats.failed} unreachable" if stats.failed else ""
                 )
-                if not switches:
-                    await self.ctx.status.record(
-                        self.name,
-                        site.config.id,
-                        True,
-                        f"no switches tagged '{tag_slug}' at this site",
-                        time.monotonic() - started,
-                    )
-                    continue
-                for switch in switches:
-                    try:
-                        await self._poll_switch(switch, site)
-                        polled += 1
-                    except Exception:
-                        failed += 1
-                        log.exception("lldp poll failed", switch=switch.name)
+                if stats.failures:
+                    message += " — " + "; ".join(stats.failures[:3])
                 await self.ctx.status.record(
-                    self.name,
-                    site.config.id,
-                    failed == 0,
-                    f"{polled} switch(es) polled" + (f", {failed} failed" if failed else ""),
-                    time.monotonic() - started,
+                    self.name, site.config.id, ok, message, time.monotonic() - started
                 )
             except Exception as exc:
                 log.exception("lldp sync failed for site", site=site.config.id)
@@ -94,51 +122,354 @@ class LldpSync:
                     self.name, site.config.id, False, str(exc), time.monotonic() - started
                 )
 
-    # ---------------------------------------------------------------- polling
+    # ------------------------------------------------------------------ crawl
 
-    async def _poll_switch(self, switch: Any, site: ResolvedSite) -> None:
+    def _credential_profiles(self, site: ResolvedSite) -> list[LldpCredential]:
+        """Site LLDP credentials first (as an implicit profile), then globals."""
+        profiles: list[LldpCredential] = []
+        s = site.config.lldp
+        if s.ssh_username or s.snmp_community:
+            profiles.append(
+                LldpCredential(
+                    name=f"{site.config.id}-site",
+                    driver="auto",
+                    username=s.ssh_username,
+                    password=s.ssh_password,
+                    snmp_community=s.snmp_community,
+                )
+            )
+        profiles.extend(self.ctx.config.lldp.credentials)
+        return profiles
+
+    async def _crawl_site(self, site: ResolvedSite) -> SiteStats:
         cfg = self.ctx.config.lldp
-        site_lldp = site.config.lldp
-        primary = getattr(switch, "primary_ip4", None) or getattr(switch, "primary_ip", None)
-        if not primary:
-            log.warning("switch has no primary IP; skipping", switch=switch.name)
-            return
-        host = str(primary.address).split("/")[0]
-        platform = getattr(getattr(switch, "platform", None), "slug", "") or ""
-        driver = cfg.platform_drivers.get(platform)
-        if driver is None:
-            driver = "unifi-ssh" if "unifi" in platform else "snmp"
+        nb = self.ctx.netbox
+        tag_slug = slugify(cfg.source_tag)
+        profiles = self._credential_profiles(site)
+        stats = SiteStats()
 
-        secrets = DeviceSecrets()
-        if self._secrets:
+        seeds = await asyncio.to_thread(
+            nb.filter_tagged, nb.api.dcim.devices, tag_slug, site_id=site.netbox_site_id
+        )
+        if not seeds:
+            log.info("no seed switches tagged for LLDP at site", site=site.config.id)
+            return stats
+
+        queue: deque[CrawlTarget] = deque()
+        visited_ip: set[str] = set()
+        visited_mac: set[str] = set()
+        for seed in seeds:
+            primary = getattr(seed, "primary_ip4", None) or getattr(seed, "primary_ip", None)
+            if not primary:
+                log.warning("seed switch has no primary IP; skipping", switch=seed.name)
+                continue
+            host = str(primary.address).split("/")[0]
+            platform = getattr(getattr(seed, "platform", None), "slug", "") or ""
+            queue.append(
+                CrawlTarget(
+                    host=host, device=seed, hint_driver=registry.select_driver(platform), depth=0
+                )
+            )
+
+        while queue and stats.polled < cfg.max_switches:
+            target = queue.popleft()
+            if target.host in visited_ip:
+                continue
+            visited_ip.add(target.host)
+            if target.chassis_mac:
+                visited_mac.add(target.chassis_mac)
+
+            poll = await self._poll_target(target, site, profiles)
+            if poll is None:
+                stats.failed += 1
+                stats.failures.append(f"{target.host} unreachable/no working credential")
+                continue
+            neighbors, cred, driver = poll
+            stats.polled += 1
+
+            device = target.device
+            if device is None:
+                device = await asyncio.to_thread(
+                    self._ensure_switch_device,
+                    site,
+                    target.host,
+                    target.sys_descr,
+                    target.chassis_mac,
+                    None,
+                )
+                if getattr(device, "_created", False):
+                    stats.created += 1
+            if device is None:
+                continue
+            await asyncio.to_thread(self._reconcile, site, device, neighbors)
+
+            if not cfg.crawl_enabled or target.depth >= cfg.max_depth:
+                continue
+            for neighbor in neighbors:
+                if not neighbor.is_crawlable_switch():
+                    continue
+                if neighbor.mgmt_ip in visited_ip or (
+                    neighbor.chassis_mac and neighbor.chassis_mac in visited_mac
+                ):
+                    continue
+                ndev = await asyncio.to_thread(
+                    self._ensure_switch_device,
+                    site,
+                    neighbor.mgmt_ip,
+                    neighbor.sys_descr,
+                    neighbor.chassis_mac,
+                    neighbor.sysname,
+                )
+                if getattr(ndev, "_created", False):
+                    stats.created += 1
+                queue.append(
+                    CrawlTarget(
+                        host=neighbor.mgmt_ip,
+                        device=ndev,
+                        hint_driver=registry.select_driver(None, neighbor.sys_descr),
+                        depth=target.depth + 1,
+                        sys_descr=neighbor.sys_descr,
+                        chassis_mac=neighbor.chassis_mac,
+                    )
+                )
+        return stats
+
+    async def _poll_target(
+        self, target: CrawlTarget, site: ResolvedSite, profiles: list[LldpCredential]
+    ) -> tuple[list[LldpNeighbor], LldpCredential | None, str] | None:
+        """Try credentials/drivers until neighbors come back. Returns
+        (neighbors, cred, driver) or None if nothing worked."""
+        attempts = await self._build_attempts(target, site, profiles)
+        ssh_unreachable = False  # a pre-auth reset means every SSH driver will fail alike
+        for driver, cred in attempts:
+            if ssh_unreachable and driver in registry.SSH_DRIVERS:
+                continue
             try:
-                secrets = await self._secrets.get_device_secrets(switch.id)
+                neighbors = await registry.collect(
+                    driver,
+                    target.host,
+                    username=cred.username if cred else "",
+                    password=cred.password if cred else "",
+                    snmp_community=cred.snmp_community if cred else "",
+                )
+                await self._cache_working(target.host, driver, cred)
+                log.info(
+                    "lldp polled",
+                    host=target.host,
+                    driver=driver,
+                    cred=cred.name if cred else "netbox-secrets",
+                    neighbors=len(neighbors),
+                )
+                return neighbors, cred, driver
             except Exception as exc:
-                log.warning("secrets lookup failed", switch=switch.name, error=str(exc))
-        fallback = cfg.fallback_creds.get(platform, LldpFallbackCred())
+                log.debug("lldp attempt failed", host=target.host, driver=driver, error=str(exc))
+                if driver in registry.SSH_DRIVERS and _is_connection_error(exc):
+                    # host rejects SSH at the transport level (reset/refused/timeout);
+                    # other SSH drivers/creds will hit the same wall — stop trying them
+                    ssh_unreachable = True
+        return None
 
-        if driver == "unifi-ssh":
-            username = secrets.ssh_username or site_lldp.ssh_username or fallback.username
-            password = secrets.ssh_password or site_lldp.ssh_password or fallback.password
-            if not username or not password:
-                log.warning("no SSH credentials for switch", switch=switch.name)
-                return
-            neighbors = await unifi_ssh_driver.collect(host, username, password)
-        else:
-            community = secrets.snmp_community or site_lldp.snmp_community or fallback.community
-            neighbors = await snmp_driver.collect(host, community)
+    async def _build_attempts(
+        self, target: CrawlTarget, site: ResolvedSite, profiles: list[LldpCredential]
+    ) -> list[tuple[str, LldpCredential | None]]:
+        attempts: list[tuple[str, LldpCredential | None]] = []
+        seen: set[tuple[str, str, str, str]] = set()
 
-        await asyncio.to_thread(self._reconcile, switch, neighbors)
+        def add(driver: str, cred: LldpCredential | None):
+            # dedupe by (driver, actual secret values) so identical creds under
+            # different profile names don't multiply connection attempts
+            key = (
+                driver,
+                cred.username if cred else "",
+                cred.password if cred else "",
+                cred.snmp_community if cred else "",
+            )
+            if driver in registry.ALL_DRIVERS and key not in seen:
+                seen.add(key)
+                attempts.append((driver, cred))
+
+        # 1. cached working combo for this host
+        cached = await self._cached_working(target.host)
+        # 2. netbox-secrets (device-attached), if we have a device + secrets client
+        secret_cred = await self._secrets_cred(target.device)
+
+        def drivers_for(cred: LldpCredential | None) -> list[str]:
+            if cred and cred.driver != "auto":
+                return [cred.driver]
+            hint = target.hint_driver
+            order = ([hint] if hint else []) + registry.AUTO_ORDER
+            # only offer SSH drivers when we have ssh creds, snmp when we have a community
+            out = []
+            for d in order:
+                if d in registry.SSH_DRIVERS and cred and cred.username:
+                    out.append(d)
+                elif d in registry.SNMP_DRIVERS and cred and cred.snmp_community:
+                    out.append(d)
+            return out
+
+        if cached:
+            cached_driver, cached_name = cached
+            cred = next((p for p in profiles if p.name == cached_name), secret_cred)
+            add(cached_driver, cred)
+        if secret_cred:
+            for d in drivers_for(secret_cred):
+                add(d, secret_cred)
+        for profile in profiles:
+            for d in drivers_for(profile):
+                add(d, profile)
+        return attempts
+
+    async def _secrets_cred(self, device: Any | None) -> LldpCredential | None:
+        if not self._secrets or device is None:
+            return None
+        try:
+            secrets: DeviceSecrets = await self._secrets.get_device_secrets(device.id)
+        except Exception as exc:
+            log.debug("secrets lookup failed", device=getattr(device, "name", "?"), error=str(exc))
+            return None
+        if secrets.ssh_username or secrets.snmp_community:
+            return LldpCredential(
+                name="netbox-secrets",
+                driver="auto",
+                username=secrets.ssh_username or "",
+                password=secrets.ssh_password or "",
+                snmp_community=secrets.snmp_community or "",
+            )
+        return None
+
+    async def _cached_working(self, host: str) -> tuple[str, str] | None:
+        if self.ctx.state is None:
+            return None
+        try:
+            raw = await self.ctx.state.get_kv(f"lldpcred:{host}")
+        except Exception:
+            return None
+        if raw:
+            data = json.loads(raw)
+            return data["driver"], data.get("cred", "")
+        return None
+
+    async def _cache_working(self, host: str, driver: str, cred: LldpCredential | None) -> None:
+        if self.ctx.state is None:
+            return
+        try:
+            await self.ctx.state.set_kv(
+                f"lldpcred:{host}",
+                json.dumps({"driver": driver, "cred": cred.name if cred else ""}),
+            )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------- device creation
+
+    def _vendor_name(self, sys_descr: str | None, chassis_mac: str | None) -> str:
+        driver = registry.select_driver(None, sys_descr)
+        names = {
+            "cisco": "Cisco",
+            "arista": "Arista",
+            "aruba": "Aruba",
+            "mikrotik": "MikroTik",
+            "unifi": "Ubiquiti",
+        }
+        if driver in names:
+            return names[driver]
+        vendor = self.ctx.oui.lookup(chassis_mac) if chassis_mac else None
+        return vendor or "Unknown"
+
+    def _ensure_switch_device(
+        self,
+        site: ResolvedSite,
+        mgmt_ip: str | None,
+        sys_descr: str | None,
+        chassis_mac: str | None,
+        sysname: str | None,
+    ) -> Any | None:
+        nb = self.ctx.netbox
+        # match existing: by chassis MAC interface, then sysname, then mgmt IP
+        device = None
+        if chassis_mac:
+            with nb.lock:
+                ifaces = list(nb.api.dcim.interfaces.filter(mac_address=chassis_mac))
+            for iface in ifaces:
+                if iface.device:
+                    with nb.lock:
+                        device = nb.api.dcim.devices.get(iface.device.id)
+                    break
+        if device is None and sysname:
+            short = sysname.split(".")[0]
+            with nb.lock:
+                matches = list(nb.api.dcim.devices.filter(name__ie=short))
+            device = matches[0] if matches else None
+        if device is not None:
+            return device
+
+        if site.netbox_site_id is None:
+            log.warning("cannot create switch without a NetBox site", site=site.config.id)
+            return None
+        vendor = self._vendor_name(sys_descr, chassis_mac)
+        _mfr, device_type = ensure_discovered_device_type(nb, f"{vendor} Switch")
+        name = (sysname.split(".")[0] if sysname else None) or (
+            f"switch-{mgmt_ip.replace('.', '-')}" if mgmt_ip else f"switch-{chassis_mac}"
+        )
+        device = nb.create(
+            nb.api.dcim.devices,
+            name=name,
+            role=nb.refs.get("role_switch") or nb.refs.get("role_discovered"),
+            device_type=device_type.id if device_type else None,
+            site=site.netbox_site_id,
+            status="active",
+            description="Auto-created from LLDP crawl",
+            tags=nb.tag_ids(MANAGED_TAG_SLUG, SRC),
+            custom_fields={"last_seen": now_iso(), "oui_vendor": vendor},
+        )
+        if device is None:
+            return None
+        device._created = True
+        # a management interface carrying the chassis MAC + primary IP
+        with nb.lock:
+            mgmt_if = nb.api.dcim.interfaces.get(device_id=device.id, name="mgmt")
+        if mgmt_if is None:
+            mgmt_if = nb.create(
+                nb.api.dcim.interfaces,
+                device=device.id,
+                name="mgmt",
+                type="other",
+                tags=nb.tag_ids(MANAGED_TAG_SLUG, SRC),
+            )
+        if mgmt_if and chassis_mac:
+            set_interface_mac(nb, mgmt_if, chassis_mac)
+        if mgmt_ip and mgmt_if:
+            from netbox_monitor.sync.common import upsert_ip
+
+            ip_obj = upsert_ip(
+                nb,
+                mgmt_ip,
+                source_slug=SRC,
+                description=f"LLDP mgmt IP for {name}",
+                assigned_object_type="dcim.interface",
+                assigned_object_id=mgmt_if.id,
+            )
+            if ip_obj is not None and getattr(device, "primary_ip4", None) is None:
+                nb.update(device, {"primary_ip4": ip_obj.id}, reason="set switch primary IP")
+        return device
 
     # ------------------------------------------------------------- reconcile
 
-    def _reconcile(self, switch: Any, neighbors: list[LldpNeighbor]) -> None:
+    def _reconcile(self, site: ResolvedSite, switch: Any, neighbors: list[LldpNeighbor]) -> None:
         nb = self.ctx.netbox
         for neighbor in neighbors:
             local_iface = self._local_interface(nb, switch, neighbor.local_port)
             if local_iface is None:
                 continue
             remote_device = self._find_remote_device(nb, neighbor)
+            if remote_device is None and neighbor.is_crawlable_switch():
+                remote_device = self._ensure_switch_device(
+                    site,
+                    neighbor.mgmt_ip,
+                    neighbor.sys_descr,
+                    neighbor.chassis_mac,
+                    neighbor.sysname,
+                )
             if remote_device is None:
                 log.info(
                     "lldp neighbor not found in NetBox",
@@ -159,11 +490,12 @@ class LldpSync:
             self._ensure_cable(nb, switch, local_iface, remote_device, remote_iface)
 
     def _local_interface(self, nb: NetBoxClient, switch: Any, name: str) -> Any | None:
+        if not name:
+            return None
         with nb.lock:
             iface = nb.api.dcim.interfaces.get(device_id=switch.id, name=name)
         if iface is not None:
             return iface
-        # additive: document the port LLDP told us about
         return nb.create(
             nb.api.dcim.interfaces,
             device=switch.id,
@@ -188,6 +520,15 @@ class LldpSync:
                 if iface.device:
                     with nb.lock:
                         return nb.api.dcim.devices.get(iface.device.id)
+        if neighbor.mgmt_ip:
+            with nb.lock:
+                ips = list(nb.api.ipam.ip_addresses.filter(address=neighbor.mgmt_ip))
+            for ip in ips:
+                dev = getattr(ip, "assigned_object", None)
+                parent = getattr(dev, "device", None) if dev else None
+                if parent:
+                    with nb.lock:
+                        return nb.api.dcim.devices.get(parent.id)
         return None
 
     def _find_remote_interface(
@@ -198,6 +539,16 @@ class LldpSync:
                 iface = nb.api.dcim.interfaces.get(device_id=device.id, name=neighbor.remote_port)
             if iface is not None:
                 return iface
+            # create the port on a switch we manage
+            if nb.is_managed(device, SRC):
+                return nb.create(
+                    nb.api.dcim.interfaces,
+                    device=device.id,
+                    name=neighbor.remote_port,
+                    type="other",
+                    description="Created from LLDP remote port",
+                    tags=nb.tag_ids(MANAGED_TAG_SLUG, SRC),
+                )
         if neighbor.remote_port and neighbor.remote_port_is_mac:
             mac = normalize_mac(neighbor.remote_port)
             if mac:
@@ -207,7 +558,6 @@ class LldpSync:
                     )
                 if matches:
                     return matches[0]
-        # single-interface hosts (our discovered devices): the only port is the one
         with nb.lock:
             ifaces = list(nb.api.dcim.interfaces.filter(device_id=device.id))
         return ifaces[0] if len(ifaces) == 1 else None
@@ -223,7 +573,7 @@ class LldpSync:
         local_cable = getattr(local_iface, "cable", None)
         remote_cable = getattr(remote_iface, "cable", None)
         if local_cable and remote_cable and local_cable.id == remote_cable.id:
-            return  # already documented
+            return
         if local_cable or remote_cable:
             log.warning(
                 "existing cable conflicts with LLDP topology; not touching it",

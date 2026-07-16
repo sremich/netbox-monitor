@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from netbox_monitor.clients.netbox import slugify
 from netbox_monitor.config import (
     LifecycleConfig,
+    LldpCredential,
     ProxmoxInstance,
     SiteConfig,
     SiteDiscoveryConfig,
@@ -186,6 +187,11 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
                 section = getattr(c, "proxmox_sync" if module == "proxmox" else module)
                 section.interval = max(15, int(form.get(f"interval_{module}") or section.interval))
                 section.enabled = form.get(f"enabled_{module}") == "on"
+            # LLDP crawl settings
+            c.lldp.crawl_enabled = form.get("lldp_crawl_enabled") == "on"
+            c.lldp.max_switches = max(1, int(form.get("lldp_max_switches") or 100))
+            c.lldp.max_depth = max(1, int(form.get("lldp_max_depth") or 8))
+            c.lldp.credentials = _lldp_credentials_from_form(form, c.lldp.credentials)
             new_password = str(form.get("new_password") or "")
             if new_password:
                 c.webui.password_hash = hash_password(new_password)
@@ -407,6 +413,39 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
 
 def _csv_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _lldp_credentials_from_form(form: Any, previous: list[LldpCredential]) -> list[LldpCredential]:
+    """Parse the repeating LLDP credential-profile rows. Blank password/community
+    fields keep the value from the same-named existing profile."""
+    prev_by_name = {p.name: p for p in previous}
+    names = form.getlist("cred_name")
+    drivers = form.getlist("cred_driver")
+    users = form.getlist("cred_username")
+    passwords = form.getlist("cred_password")
+    communities = form.getlist("cred_community")
+    creds: list[LldpCredential] = []
+    for i, name in enumerate(names):
+        name = str(name).strip()
+        if not name:
+            continue
+        prev = prev_by_name.get(name)
+
+        def pick(values, idx=i, keep=""):
+            return str(values[idx]).strip() if idx < len(values) else keep
+
+        password = pick(passwords) or (prev.password if prev else "")
+        community = pick(communities) or (prev.snmp_community if prev else "")
+        creds.append(
+            LldpCredential(
+                name=name,
+                driver=pick(drivers, keep="auto") or "auto",
+                username=pick(users),
+                password=password,
+                snmp_community=community,
+            )
+        )
+    return creds
 
 
 def _site_from_form(form: Any, existing: SiteConfig | None) -> SiteConfig:

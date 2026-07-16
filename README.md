@@ -11,7 +11,7 @@ APIs:
 | **discovery** | Ping-sweeps every active NetBox prefix *outside* the DHCP scopes; responders become Devices with MAC, OUI manufacturer, reverse-DNS name | 15 min |
 | **availability** | Pings all discovered/reserved hosts; unreachable > 10 min → tagged `stale` + status offline, auto-recovers when back | 60s |
 | **proxmox** | Syncs PVE nodes, QEMU VMs and LXC containers (resources, interfaces, IPs via guest agent) into NetBox virtualization | 5 min |
-| **lldp** | Polls switches tagged `lldp-source` (SNMP, or SSH+lldpd for UniFi) and documents topology as cables; credentials come from the netbox-secrets plugin | 30 min |
+| **lldp** | Crawls the switch fabric from `lldp-source` seeds (Cisco/Arista/Aruba/MikroTik/UniFi over SSH, or SNMP), auto-creates discovered switches, and documents links as cables | 30 min |
 | **certs** | Probes TLS ports on every host with a primary IP; records expiry/issuer/CN, tags `cert-expiring` / `cert-expired` | daily |
 
 Everything the service creates is tagged `managed:netbox-monitor` plus a source tag
@@ -74,18 +74,39 @@ prefer a gradual rollout.
 Images are published to `ghcr.io/sremich/netbox-monitor` by CI on every push to `main`;
 deployment is `docker compose pull && docker compose up -d`.
 
-### LLDP topology (optional)
+### LLDP topology crawl (optional)
 
-1. In NetBox, tag your switches `lldp-source`, give each a primary IP, assign them to
-   the right Site, and set their platform (`unifi` platforms are queried via SSH+lldpd;
-   everything else via SNMP).
-2. In the web UI, open the site → **LLDP topology**: enable it and enter the site's
-   SNMP community and/or SSH credentials. Each site polls only its own switches.
-3. Optional, for per-switch credentials: install the
-   [netbox-secrets](https://github.com/Onemind-Services-LLC/netbox-secrets) plugin,
-   point `lldp.secrets_private_key` at your RSA key, and attach secrets to switch
-   devices (role `snmp` → plaintext community; role `ssh` → name = username,
-   plaintext = password). Plugin credentials take precedence over site-wide ones.
+The LLDP module maps your physical switch fabric and draws it as NetBox cables. It
+**crawls**: from a few seed switches it reads LLDP neighbors, follows switch-to-switch
+links, auto-creates any switch it finds, authenticates to it, and continues — so you
+only have to seed a couple of switches to map the whole fabric.
+
+1. **Seed** a switch or two: tag them `lldp-source` in NetBox, give each a primary IP,
+   assign them to a Site, and set their platform (`cisco`, `arista`, `aruba`, `mikrotik`,
+   `unifi`, … — used to pick the driver; unknown platforms are auto-detected).
+2. **Site credentials** (site page → LLDP topology): the SSH user/password and/or SNMP
+   community for that site's switches — tried first against everything at the site.
+3. **Global credential profiles** (Settings → LLDP topology crawl): a list of
+   name + driver + SSH/SNMP secrets tried, in order, against every switch the crawl
+   discovers. Also set the crawl toggle and `max switches`/`max depth` bounds here.
+4. Enable LLDP for the site and turn crawl on.
+
+Supported drivers: **Cisco** IOS/NX-OS, **Arista** EOS, **Aruba** (CX + ArubaOS-Switch),
+**MikroTik** RouterOS, **UniFi** (all over SSH), and **SNMP** LLDP-MIB for anything else
+with SNMP enabled. Discovered switches become NetBox devices (role **Switch**, tagged
+`src:lldp`) with their management IP; a working driver+credential is cached per switch so
+later runs skip the trial loop. Only neighbors matching a known switch vendor are crawled,
+so hosts that merely advertise a bridge (e.g. Linux/Proxmox nodes) are never touched.
+
+Optional per-switch credentials: install the
+[netbox-secrets](https://github.com/Onemind-Services-LLC/netbox-secrets) plugin, point
+`lldp.secrets_private_key` at your RSA key, and attach secrets to switch devices
+(role `snmp` → community; role `ssh` → name = username, plaintext = password). Plugin
+credentials take precedence.
+
+> **Switch ACLs**: many switches restrict SSH/SNMP to a management subnet (Cisco vty
+> `access-class`). Permit the host running netbox-monitor, or the crawl will log those
+> switches as unreachable (it stops after one connection-reset rather than retrying).
 
 ## NetBox objects it maintains
 

@@ -136,15 +136,31 @@ class LldpFallbackCred(BaseModel):
     password: str = ""
 
 
+class LldpCredential(BaseModel):
+    """A credential profile the crawl tries against discovered switches, in order."""
+
+    name: str
+    driver: str = "auto"  # auto | cisco | arista | aruba | mikrotik | unifi | snmp
+    username: str = ""
+    password: str = ""
+    snmp_community: str = ""
+
+
 class LldpConfig(ModuleConfig):
     enabled: bool = False  # requires switches tagged in NetBox; off until configured
     interval: int = Field(default=1800, ge=15)
     source_tag: str = "lldp-source"
-    # platform slug -> driver name ("snmp" | "unifi-ssh"); unmatched platforms default to snmp
+    # platform slug -> driver name; unmatched platforms are auto-detected
     platform_drivers: dict[str, str] = Field(default_factory=dict)
     secrets_private_key: str | None = None  # path to RSA private key for netbox-secrets plugin
     # platform slug -> credentials used when netbox-secrets has none for a device
     fallback_creds: dict[str, LldpFallbackCred] = Field(default_factory=dict)
+    # crawl: propagate from seed switches to their switch-neighbors
+    crawl_enabled: bool = True
+    max_switches: int = 100  # crawl safety cap
+    max_depth: int = 8
+    # global credential profiles tried (after site creds) against discovered switches
+    credentials: list[LldpCredential] = Field(default_factory=list)
 
 
 class CertsConfig(ModuleConfig):

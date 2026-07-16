@@ -37,6 +37,7 @@ CUSTOM_FIELDS = [
 DEVICE_ROLES = [
     ("Discovered", "discovered", "9e9e9e", "Auto-discovered by netbox-monitor"),
     ("Hypervisor", "hypervisor", "673ab7", "Proxmox VE node"),
+    ("Switch", "switch", "1976d2", "Network switch (LLDP topology)"),
 ]
 
 

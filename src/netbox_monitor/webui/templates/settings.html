@@ -43,6 +43,46 @@
   </article>
 
   <article>
+    <header><strong>LLDP topology crawl</strong></header>
+    <p><small>Starting from switches tagged <code>lldp-source</code>, the crawl reads LLDP
+    neighbors and follows switch-to-switch links across the fabric, authenticating to each
+    newly found switch with the credential profiles below. Per-site credentials (on each
+    site page) are tried first.</small></p>
+    <label><input type="checkbox" name="lldp_crawl_enabled"
+                  {% if config.lldp.crawl_enabled %}checked{% endif %}>
+      Enable crawl propagation (off = poll only tagged switches)</label>
+    <div class="grid">
+      <label>Max switches per run
+        <input type="number" name="lldp_max_switches" min="1" value="{{ config.lldp.max_switches }}"></label>
+      <label>Max crawl depth
+        <input type="number" name="lldp_max_depth" min="1" value="{{ config.lldp.max_depth }}"></label>
+    </div>
+    <p><strong>Credential profiles</strong> <small>(tried in order against discovered switches)</small></p>
+    <table>
+      <thead><tr><th>Name</th><th>Driver</th><th>SSH user</th><th>SSH password</th><th>SNMP community</th></tr></thead>
+      <tbody>
+      {% set drivers = ['auto','cisco','arista','aruba','mikrotik','unifi','snmp'] %}
+      {% for cred in config.lldp.credentials + [none] %}
+        <tr>
+          <td><input type="text" name="cred_name" value="{{ cred.name if cred else '' }}"
+                     placeholder="{{ 'blank row ignored' if not cred else '' }}"></td>
+          <td><select name="cred_driver">
+            {% for d in drivers %}<option value="{{ d }}"
+              {% if cred and cred.driver == d %}selected{% endif %}>{{ d }}</option>{% endfor %}
+          </select></td>
+          <td><input type="text" name="cred_username" value="{{ cred.username if cred else '' }}"></td>
+          <td><input type="password" name="cred_password"
+                     placeholder="{{ '•••••• (kept)' if cred and cred.password else '' }}"></td>
+          <td><input type="password" name="cred_community"
+                     placeholder="{{ '•••••• (kept)' if cred and cred.snmp_community else '' }}"></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p><small>Add a row by filling the blank one; save again for another blank row.</small></p>
+  </article>
+
+  <article>
     <header><strong>Lifecycle &amp; behavior</strong></header>
     <label><input type="checkbox" name="delete_dhcp_on_expiry"
                   {% if config.lifecycle.delete_dhcp_on_expiry %}checked{% endif %}>
