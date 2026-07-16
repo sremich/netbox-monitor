@@ -117,7 +117,11 @@ async def collect(host: str, community: str) -> list[LldpNeighbor]:
     local_ports: dict[int, str] = {}
     for oid, value in await _walk(host, community, OID_LOC_PORT_ID):
         port_num = int(oid.rsplit(".", 1)[1])
-        local_ports[port_num] = _decode(value)
+        name = _decode(value)
+        # some switches report a binary/MAC port id that decodes to junk; fall back
+        if not name or not all(32 <= ord(ch) < 127 for ch in name):
+            name = f"port{port_num}"
+        local_ports[port_num] = name
 
     # remote table rows grouped by (localPortNum, index)
     rows: dict[tuple[int, int], dict[int, object]] = {}
@@ -135,9 +139,10 @@ async def collect(host: str, community: str) -> list[LldpNeighbor]:
     man_base_len = len(OID_REM_MAN_ADDR.split("."))
     try:
         for oid, _value in await _walk(host, community, OID_REM_MAN_ADDR):
+            # index after base: <column>.<timeMark>.<localPortNum>.<remIndex>.<addr...>
             idx_parts = oid.split(".")[man_base_len:]
-            if len(idx_parts) >= 3:
-                key = (int(idx_parts[1]), int(idx_parts[2]))
+            if len(idx_parts) >= 4:
+                key = (int(idx_parts[2]), int(idx_parts[3]))
                 addr = _man_addr_from_oid(oid, man_base_len)
                 if addr and key not in man_addrs:
                     man_addrs[key] = addr
@@ -150,8 +155,13 @@ async def collect(host: str, community: str) -> list[LldpNeighbor]:
         port_subtype = int(columns.get(COL_PORT_SUBTYPE, 0) or 0)
         chassis_raw = columns.get(COL_CHASSIS_ID)
         chassis_mac = None
-        if chassis_raw is not None and chassis_subtype == MAC_SUBTYPE:
-            chassis_mac = normalize_mac(_decode(chassis_raw, as_mac_if_binary=True))
+        if chassis_raw is not None:
+            if chassis_subtype == MAC_SUBTYPE:
+                chassis_mac = normalize_mac(_decode(chassis_raw, as_mac_if_binary=True))
+            else:
+                # some switches (e.g. Cisco Small Business) advertise the chassis
+                # MAC as a text string under a non-mac subtype
+                chassis_mac = normalize_mac(_decode(chassis_raw))
         port_raw = columns.get(COL_PORT_ID)
         remote_port = _decode(port_raw, as_mac_if_binary=True) if port_raw is not None else None
         sysname = _decode(columns[COL_SYSNAME]) if COL_SYSNAME in columns else None

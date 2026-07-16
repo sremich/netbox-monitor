@@ -107,10 +107,12 @@ async def collect(host: str, username: str, password: str) -> list[LldpNeighbor]
     async with await legacy_connect(host, username, password) as conn:
         # disable paging where the exec channel honors it; harmless otherwise
         try:
-            await run_command(conn, "terminal length 0", timeout=8)
+            await run_command(conn, "terminal length 0", timeout=6)
         except Exception:
             pass
-        output = await run_command(conn, "show lldp neighbors detail")
+        # short timeout: Cisco Small Business (Sx300/350) CLIs hang the exec channel;
+        # a fast failure lets the crawl fall back to SNMP for those switches
+        output = await run_command(conn, "show lldp neighbors detail", timeout=12)
     neighbors = parse_lldp_detail(output)
     log.info("cisco-style lldp neighbors collected", host=host, count=len(neighbors))
     return neighbors

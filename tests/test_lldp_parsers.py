@@ -126,6 +126,54 @@ def test_arista_json_parses():
     assert n.is_crawlable_switch() is True
 
 
+def test_snmp_sg300_encoding(monkeypatch):
+    """Regression for the real Cisco SG300-10: chassis MAC advertised as an ASCII
+    string (not binary), and the mgmt-address OID index (captured live)."""
+    import asyncio
+
+    from netbox_monitor.lldp import snmp_driver
+
+    class Oct:
+        def __init__(self, b):
+            self._b = b if isinstance(b, bytes) else b.encode()
+
+        def asOctets(self):
+            return self._b
+
+        def __bytes__(self):
+            return self._b
+
+    REM = snmp_driver.OID_REM_BASE
+    LOC = snmp_driver.OID_LOC_PORT_ID
+    MAN = snmp_driver.OID_REM_MAN_ADDR
+    walks = {
+        LOC: [(f"{LOC}.58", Oct("gi10"))],
+        REM: [
+            (f"{REM}.4.0.58.51", 7),  # chassisSubtype = local(7)
+            (f"{REM}.5.0.58.51", Oct("1c:0b:8b:16:79:60")),  # chassisId as text
+            (f"{REM}.6.0.58.51", 3),  # portSubtype = mac
+            (f"{REM}.7.0.58.51", Oct(bytes.fromhex("1c0b8b167960"))),
+            (f"{REM}.9.0.58.51", Oct("RemichNet-Unifi-UK")),
+            (f"{REM}.10.0.58.51", Oct("Debian GNU/Linux 11 ui-ipq9574")),
+            (f"{REM}.12.0.58.51", Oct(b"\x28\x00")),  # caps: bridge + router
+        ],
+        MAN: [(f"{MAN}.3.0.58.51.1.4.10.200.1.1", 2)],
+    }
+
+    async def fake_walk(host, community, oid):
+        return walks.get(oid, [])
+
+    monkeypatch.setattr(snmp_driver, "_walk", fake_walk)
+    neighbors = asyncio.run(snmp_driver.collect("10.200.11.5", "public"))
+    assert len(neighbors) == 1
+    n = neighbors[0]
+    assert n.local_port == "gi10"
+    assert n.chassis_mac == "1C:0B:8B:16:79:60"  # parsed from the ASCII-string chassis id
+    assert n.mgmt_ip == "10.200.1.1"  # mgmt-address OID index parsed correctly
+    assert n.capabilities == {"bridge", "router"}
+    assert n.is_crawlable_switch() is True  # "Unifi" in sysname + mgmt IP
+
+
 def test_vendor_signature_gate():
     # a NAS advertising bridge but no switch vendor -> not crawlable
     nas = LldpNeighbor(
