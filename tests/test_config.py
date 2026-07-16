@@ -5,6 +5,10 @@ from netbox_monitor.config import load_config
 
 def test_load_config_env_interpolation(tmp_path, monkeypatch):
     monkeypatch.setenv("NETBOX_TOKEN", "sekrit")
+    # a developer .env may define this for real; the default-fallback assertion
+    # below needs it absent
+    monkeypatch.delenv("TECHNITIUM_TOKEN", raising=False)
+    monkeypatch.chdir(tmp_path)  # keep load_dotenv() away from any real .env
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(
         textwrap.dedent(

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import structlog
+from pynetbox.core.query import RequestError
 
 from netbox_monitor.clients.netbox import MANAGED_TAG_SLUG, NetBoxClient, slugify
 
@@ -74,7 +75,12 @@ def upsert_ip(
         if assigned_object_type and assigned_object_id:
             data["assigned_object_type"] = assigned_object_type
             data["assigned_object_id"] = assigned_object_id
-        return nb.create(nb.api.ipam.ip_addresses, **data)
+        try:
+            return nb.create(nb.api.ipam.ip_addresses, **data)
+        except RequestError as exc:
+            # e.g. NetBox refuses IPs inside an IP range marked as populated
+            log.info("NetBox rejected IP creation; skipping", ip=ip, error=str(exc))
+            return None
 
     updates: dict[str, Any] = {}
     if nb.is_managed(obj, source_slug):
@@ -175,6 +181,12 @@ def ensure_host_device(
         )
         if device is None:  # dry-run
             return None
+    elif not nb.is_managed(device):
+        # a human documented this device; enrich last_seen but leave its
+        # interfaces/IPs/primary IP entirely alone
+        log.info("device exists unmanaged; only updating last_seen", device=str(device))
+        nb.set_custom_fields(device, last_seen=now_iso())
+        return device
     else:
         nb.set_custom_fields(device, last_seen=now_iso(), oui_vendor=vendor or "")
 
@@ -202,6 +214,14 @@ def ensure_host_device(
         assigned_object_type="dcim.interface" if iface else None,
         assigned_object_id=iface.id if iface else None,
     )
-    if ip_obj is not None and getattr(device, "primary_ip4", None) is None:
-        nb.update(device, {"primary_ip4": ip_obj.id}, reason="set primary IP")
+    if ip_obj is not None and iface is not None and getattr(device, "primary_ip4", None) is None:
+        if getattr(ip_obj, "assigned_object_id", None) == iface.id:
+            nb.update(device, {"primary_ip4": ip_obj.id}, reason="set primary IP")
+        else:
+            # pre-existing IP owned by someone else; don't hijack it
+            log.info(
+                "IP exists but is not assigned to our interface; primary IP not set",
+                device=str(device),
+                ip=ip,
+            )
     return device

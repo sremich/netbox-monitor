@@ -125,6 +125,5 @@ class AvailabilitySync:
 
     def _monitored_devices(self) -> list[Any]:
         nb = self.ctx.netbox
-        with nb.lock:
-            devices = list(nb.api.dcim.devices.filter(tag=[MANAGED_TAG_SLUG]))
+        devices = nb.filter_tagged(nb.api.dcim.devices, MANAGED_TAG_SLUG)
         return [d for d in devices if nb.obj_tag_slugs(d) & set(MONITORED_SOURCES)]

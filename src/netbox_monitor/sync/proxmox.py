@@ -260,10 +260,9 @@ class ProxmoxSync:
                 primary_set = True
 
     def _mark_vanished(self, nb: NetBoxClient, cluster: Any, seen: set[str]) -> None:
-        with nb.lock:
-            existing = list(
-                nb.api.virtualization.virtual_machines.filter(cluster_id=cluster.id, tag=[SRC])
-            )
+        existing = nb.filter_tagged(
+            nb.api.virtualization.virtual_machines, SRC, cluster_id=cluster.id
+        )
         for vm in existing:
             if vm.name in seen:
                 continue

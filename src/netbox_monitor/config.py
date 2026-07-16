@@ -137,7 +137,11 @@ class AppConfig(BaseModel):
 
 
 def load_config(path: str | Path) -> AppConfig:
-    """Load YAML config with ${ENV_VAR} / ${ENV_VAR:-default} interpolation."""
-    load_dotenv()  # .env in cwd, if present
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    """Load YAML config with ${ENV_VAR} / ${ENV_VAR:-default} interpolation.
+
+    Secrets are read from a ``.env`` sitting next to the config file (if any).
+    """
+    path = Path(path)
+    load_dotenv(path.resolve().parent / ".env")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return AppConfig.model_validate(_interpolate(raw))

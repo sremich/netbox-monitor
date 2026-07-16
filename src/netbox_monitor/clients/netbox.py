@@ -15,6 +15,7 @@ from typing import Any
 
 import pynetbox
 import structlog
+from pynetbox.core.query import RequestError
 
 from netbox_monitor.config import NetBoxConfig
 
@@ -54,6 +55,10 @@ class NetBoxClient:
         self.dry_run = dry_run
         self.api = pynetbox.api(config.url, token=config.token)
         self.api.http_session.verify = config.verify_ssl
+        if not config.verify_ssl:
+            import urllib3
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         # pynetbox shares one requests.Session; serialize access across sync loops.
         self.lock = threading.RLock()
         self._tag_ids: dict[str, int] = {}  # slug -> id
@@ -142,6 +147,18 @@ class NetBoxClient:
         return self.update(obj, {"custom_fields": {**current, **changed}}, reason="custom fields")
 
     # --------------------------------------------------------------- helpers
+
+    def filter_tagged(self, endpoint: Any, tag_slug: str, **extra: Any) -> list[Any]:
+        """Filter an endpoint by tag slug; empty when the tag doesn't exist yet
+        (fresh NetBox in dry-run mode, where bootstrap didn't really create tags)."""
+        try:
+            with self.lock:
+                return list(endpoint.filter(tag=[tag_slug], **extra))
+        except RequestError as exc:
+            if "not one of the available choices" in str(exc):
+                log.info("tag not present in NetBox yet", tag=tag_slug)
+                return []
+            raise
 
     def ensure(self, endpoint: Any, lookup: dict[str, Any], defaults: dict[str, Any]) -> Any | None:
         """Get an object matching ``lookup``; create it (lookup+defaults) if absent."""

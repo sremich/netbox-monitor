@@ -56,17 +56,21 @@ class DiscoverySync:
             vendor = self.ctx.oui.lookup(mac) if mac else None
             rdns = sanitize_dns_name(await reverse_dns(ip))
             name = rdns.split(".")[0] if rdns else f"discovered-{ip.replace('.', '-')}"
-            await asyncio.to_thread(
-                ensure_host_device,
-                self.ctx.netbox,
-                name=name,
-                ip=ip,
-                source_slug=SRC,
-                mac=mac,
-                vendor=vendor,
-                dns_name=rdns,
-                description="Discovered by ping sweep",
-            )
+            try:
+                await asyncio.to_thread(
+                    ensure_host_device,
+                    self.ctx.netbox,
+                    name=name,
+                    ip=ip,
+                    source_slug=SRC,
+                    mac=mac,
+                    vendor=vendor,
+                    dns_name=rdns,
+                    description="Discovered by ping sweep",
+                )
+            except Exception:
+                log.exception("failed to document discovered host", ip=ip)
+                continue
             await self.ctx.state.record_check(f"ip:{ip}", up=True)
 
     # ----------------------------------------------------------------- setup

@@ -18,6 +18,12 @@ import structlog
 log = structlog.get_logger(__name__)
 
 OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"
+# IEEE rejects non-browser clients (HTTP 418), so present a browser UA
+OUI_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+}
+FALLBACK_URL = "https://www.wireshark.org/download/automated/data/manuf"
 REFRESH_SECONDS = 30 * 24 * 3600
 
 _BUILTIN = {
@@ -61,33 +67,55 @@ class OuiDB:
             return True
 
     async def _download(self) -> None:
-        log.info("downloading IEEE OUI database", url=OUI_URL)
-        try:
-            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-                resp = await client.get(OUI_URL)
-                resp.raise_for_status()
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_bytes(resp.content)
-            log.info("OUI database saved", bytes=len(resp.content))
-        except Exception as exc:
-            log.warning("OUI download failed; using cached/builtin table", error=str(exc))
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+            for url, headers in ((OUI_URL, OUI_HEADERS), (FALLBACK_URL, {})):
+                log.info("downloading OUI database", url=url)
+                try:
+                    resp = await client.get(url, headers=headers)
+                    resp.raise_for_status()
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
+                    self.path.write_bytes(resp.content)
+                    log.info("OUI database saved", url=url, bytes=len(resp.content))
+                    return
+                except Exception as exc:
+                    log.warning("OUI download failed", url=url, error=str(exc))
+        log.warning("all OUI sources failed; using cached/builtin table")
 
     def _parse(self) -> None:
         if not self.path.exists():
             return
         try:
             text = self.path.read_text(encoding="utf-8", errors="replace")
-            reader = csv.DictReader(io.StringIO(text))
-            count = 0
-            for row in reader:
-                assignment = (row.get("Assignment") or "").strip().upper()
-                org = (row.get("Organization Name") or "").strip()
-                if len(assignment) == 6 and org:
-                    self._table[assignment] = org
-                    count += 1
+            count = self._parse_ieee_csv(text) or self._parse_wireshark_manuf(text)
             log.info("OUI database loaded", entries=count)
         except Exception as exc:
             log.warning("OUI parse failed; using builtin table", error=str(exc))
+
+    def _parse_ieee_csv(self, text: str) -> int:
+        count = 0
+        for row in csv.DictReader(io.StringIO(text)):
+            assignment = (row.get("Assignment") or "").strip().upper()
+            org = (row.get("Organization Name") or "").strip()
+            if len(assignment) == 6 and org:
+                self._table[assignment] = org
+                count += 1
+        return count
+
+    def _parse_wireshark_manuf(self, text: str) -> int:
+        """Wireshark manuf format: 'BC:24:11<tab>ShortName<tab>Full Name'."""
+        count = 0
+        for line in text.splitlines():
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            prefix = re.sub(r"[^0-9A-Fa-f]", "", parts[0].split("/")[0]).upper()
+            org = (parts[2] if len(parts) > 2 and parts[2].strip() else parts[1]).strip()
+            if len(prefix) == 6 and org:
+                self._table[prefix] = org
+                count += 1
+        return count
 
     def lookup(self, mac: str | None) -> str | None:
         normalized = normalize_mac(mac or "")

@@ -41,11 +41,7 @@ class LldpSync:
         nb = self.ctx.netbox
         tag_slug = slugify(cfg.source_tag)
 
-        def fetch_switches() -> list[Any]:
-            with nb.lock:
-                return list(nb.api.dcim.devices.filter(tag=[tag_slug]))
-
-        switches = await asyncio.to_thread(fetch_switches)
+        switches = await asyncio.to_thread(nb.filter_tagged, nb.api.dcim.devices, tag_slug)
         if not switches:
             log.info("no switches tagged for LLDP", tag=tag_slug)
             return

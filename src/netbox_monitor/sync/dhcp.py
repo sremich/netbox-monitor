@@ -62,29 +62,32 @@ class DhcpSync:
             hostname = sanitize_dns_name(lease.get("hostName"))
             scope_name = lease.get("scope", "")
 
-            if lease_type == "reserved":
-                ensure_host_device(
-                    nb,
-                    name=hostname.split(".")[0] if hostname else f"reserved-{address}",
-                    ip=address,
-                    source_slug=SRC,
-                    mac=mac,
-                    vendor=vendor,
-                    dns_name=hostname,
-                    description=f"DHCP reservation in scope '{scope_name}'",
-                )
-            else:
-                active_dynamic.add(address)
-                upsert_ip(
-                    nb,
-                    address,
-                    source_slug=SRC,
-                    status="dhcp",
-                    dns_name=hostname,
-                    description=f"DHCP lease in scope '{scope_name}'",
-                    mac=mac,
-                    vendor=vendor,
-                )
+            try:
+                if lease_type == "reserved":
+                    ensure_host_device(
+                        nb,
+                        name=hostname.split(".")[0] if hostname else f"reserved-{address}",
+                        ip=address,
+                        source_slug=SRC,
+                        mac=mac,
+                        vendor=vendor,
+                        dns_name=hostname,
+                        description=f"DHCP reservation in scope '{scope_name}'",
+                    )
+                else:
+                    active_dynamic.add(address)
+                    upsert_ip(
+                        nb,
+                        address,
+                        source_slug=SRC,
+                        status="dhcp",
+                        dns_name=hostname,
+                        description=f"DHCP lease in scope '{scope_name}'",
+                        mac=mac,
+                        vendor=vendor,
+                    )
+            except Exception:
+                log.exception("failed to sync lease", address=address, type=lease_type)
 
         if self.ctx.config.lifecycle.delete_dhcp_on_expiry:
             self._delete_expired(active_dynamic)
@@ -113,8 +116,7 @@ class DhcpSync:
         are assigned to an interface, and those are skipped here.
         """
         nb = self.ctx.netbox
-        with nb.lock:
-            managed = list(nb.api.ipam.ip_addresses.filter(tag=[SRC]))
+        managed = nb.filter_tagged(nb.api.ipam.ip_addresses, SRC)
         for obj in managed:
             host = str(obj.address).split("/")[0]
             if host in active:
