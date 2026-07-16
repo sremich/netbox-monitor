@@ -1,11 +1,14 @@
-"""LLDP topology sync: poll switches tagged ``lldp-source`` in NetBox, resolve
-credentials from the netbox-secrets plugin (config fallback), and document
-neighbor relationships as NetBox cables tagged ``src:lldp``.
+"""LLDP topology sync: poll each site's switches tagged ``lldp-source`` and
+document neighbor relationships as NetBox cables tagged ``src:lldp``.
+
+Credential resolution per switch: netbox-secrets plugin (when configured) →
+the site's LLDP credentials → global ``lldp.fallback_creds`` by platform.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import structlog
@@ -13,7 +16,7 @@ import structlog
 from netbox_monitor.clients.netbox import MANAGED_TAG_SLUG, NetBoxClient, slugify
 from netbox_monitor.clients.secrets import DeviceSecrets, SecretsClient
 from netbox_monitor.config import LldpFallbackCred
-from netbox_monitor.context import Context
+from netbox_monitor.context import Context, ResolvedSite
 from netbox_monitor.lldp import LldpNeighbor, snmp_driver, unifi_ssh_driver
 from netbox_monitor.oui import normalize_mac
 
@@ -36,26 +39,66 @@ class LldpSync:
                 verify_ssl=ctx.config.netbox.verify_ssl,
             )
 
+    def _enabled_sites(self) -> list[ResolvedSite]:
+        enabled = [s for s in self.ctx.sites if s.config.lldp.enabled]
+        if enabled:
+            return enabled
+        # legacy behavior: global lldp.enabled with no per-site flags polls all sites
+        return list(self.ctx.sites) if self.ctx.config.lldp.enabled else []
+
     async def run(self) -> None:
         cfg = self.ctx.config.lldp
         nb = self.ctx.netbox
         tag_slug = slugify(cfg.source_tag)
-
-        switches = await asyncio.to_thread(nb.filter_tagged, nb.api.dcim.devices, tag_slug)
-        if not switches:
-            log.info("no switches tagged for LLDP", tag=tag_slug)
+        sites = self._enabled_sites()
+        if not sites:
+            log.info("no sites with LLDP enabled")
             return
 
-        for switch in switches:
+        for site in sites:
+            started = time.monotonic()
+            polled = failed = 0
             try:
-                await self._poll_switch(switch)
-            except Exception:
-                log.exception("lldp poll failed", switch=switch.name)
+                switches = await asyncio.to_thread(
+                    nb.filter_tagged,
+                    nb.api.dcim.devices,
+                    tag_slug,
+                    site_id=site.netbox_site_id,
+                )
+                if not switches:
+                    await self.ctx.status.record(
+                        self.name,
+                        site.config.id,
+                        True,
+                        f"no switches tagged '{tag_slug}' at this site",
+                        time.monotonic() - started,
+                    )
+                    continue
+                for switch in switches:
+                    try:
+                        await self._poll_switch(switch, site)
+                        polled += 1
+                    except Exception:
+                        failed += 1
+                        log.exception("lldp poll failed", switch=switch.name)
+                await self.ctx.status.record(
+                    self.name,
+                    site.config.id,
+                    failed == 0,
+                    f"{polled} switch(es) polled" + (f", {failed} failed" if failed else ""),
+                    time.monotonic() - started,
+                )
+            except Exception as exc:
+                log.exception("lldp sync failed for site", site=site.config.id)
+                await self.ctx.status.record(
+                    self.name, site.config.id, False, str(exc), time.monotonic() - started
+                )
 
     # ---------------------------------------------------------------- polling
 
-    async def _poll_switch(self, switch: Any) -> None:
+    async def _poll_switch(self, switch: Any, site: ResolvedSite) -> None:
         cfg = self.ctx.config.lldp
+        site_lldp = site.config.lldp
         primary = getattr(switch, "primary_ip4", None) or getattr(switch, "primary_ip", None)
         if not primary:
             log.warning("switch has no primary IP; skipping", switch=switch.name)
@@ -75,14 +118,14 @@ class LldpSync:
         fallback = cfg.fallback_creds.get(platform, LldpFallbackCred())
 
         if driver == "unifi-ssh":
-            username = secrets.ssh_username or fallback.username
-            password = secrets.ssh_password or fallback.password
+            username = secrets.ssh_username or site_lldp.ssh_username or fallback.username
+            password = secrets.ssh_password or site_lldp.ssh_password or fallback.password
             if not username or not password:
                 log.warning("no SSH credentials for switch", switch=switch.name)
                 return
             neighbors = await unifi_ssh_driver.collect(host, username, password)
         else:
-            community = secrets.snmp_community or fallback.community
+            community = secrets.snmp_community or site_lldp.snmp_community or fallback.community
             neighbors = await snmp_driver.collect(host, community)
 
         await asyncio.to_thread(self._reconcile, switch, neighbors)

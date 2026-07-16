@@ -130,3 +130,41 @@ def test_site_crud(client, store):
     response = client.post("/sites/beach-house/delete")
     assert response.status_code == 303
     assert store.get().sites == []
+
+
+def test_site_lldp_settings(client, store):
+    login(client)
+    base = {
+        "name": "Lab",
+        "netbox_site": "__new__",
+        "netbox_site_name": "Lab",
+        "lldp_enabled": "on",
+        "lldp_snmp_community": "labcommunity",
+        "lldp_ssh_username": "admin",
+        "lldp_ssh_password": "hunter33",
+    }
+    assert client.post("/sites/new", data=base).status_code == 303
+    site = store.get().sites[0]
+    assert site.lldp.enabled is True
+    assert site.lldp.snmp_community == "labcommunity"
+    assert site.lldp.ssh_username == "admin"
+    assert site.lldp.ssh_password == "hunter33"
+
+    # edit with blank secret fields: community/password kept, username is literal
+    edit = {
+        "name": "Lab",
+        "netbox_site": "lab",
+        "lldp_enabled": "on",
+        "lldp_snmp_community": "",
+        "lldp_ssh_username": "admin",
+        "lldp_ssh_password": "",
+    }
+    assert client.post("/sites/lab", data=edit).status_code == 303
+    site = store.get().sites[0]
+    assert site.lldp.snmp_community == "labcommunity"
+    assert site.lldp.ssh_password == "hunter33"
+
+    # unchecking the box disables lldp for the site
+    edit.pop("lldp_enabled")
+    assert client.post("/sites/lab", data=edit).status_code == 303
+    assert store.get().sites[0].lldp.enabled is False

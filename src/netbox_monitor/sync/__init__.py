@@ -27,6 +27,10 @@ def build_modules(ctx: Context) -> list[SyncModule]:
     ]
     modules = []
     for cfg, instance, interval in candidates:
-        if cfg.enabled:
+        enabled = cfg.enabled
+        if instance.name == "lldp":
+            # lldp runs when enabled globally OR on any site
+            enabled = enabled or any(s.config.lldp.enabled for s in ctx.sites)
+        if enabled:
             modules.append(SyncModule(name=instance.name, interval=interval, run=instance.run))
     return modules

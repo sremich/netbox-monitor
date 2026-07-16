@@ -76,16 +76,16 @@ deployment is `docker compose pull && docker compose up -d`.
 
 ### LLDP topology (optional)
 
-1. Install the [netbox-secrets](https://github.com/Onemind-Services-LLC/netbox-secrets)
-   plugin in NetBox and generate an RSA key pair for your API user; mount the private key
-   into the container and point `lldp.secrets_private_key` at it.
-2. Attach secrets to each switch device: role `snmp` (plaintext = community string) or
-   role `ssh` (secret name = username, plaintext = password, used for UniFi).
-3. In NetBox, tag the switches `lldp-source`, give them a primary IP, and set their
-   platform (`unifi` platforms use SSH+lldpd; everything else SNMP).
-4. Set `lldp.enabled: true`.
-
-No netbox-secrets? Use `lldp.fallback_creds` in the config instead.
+1. In NetBox, tag your switches `lldp-source`, give each a primary IP, assign them to
+   the right Site, and set their platform (`unifi` platforms are queried via SSH+lldpd;
+   everything else via SNMP).
+2. In the web UI, open the site → **LLDP topology**: enable it and enter the site's
+   SNMP community and/or SSH credentials. Each site polls only its own switches.
+3. Optional, for per-switch credentials: install the
+   [netbox-secrets](https://github.com/Onemind-Services-LLC/netbox-secrets) plugin,
+   point `lldp.secrets_private_key` at your RSA key, and attach secrets to switch
+   devices (role `snmp` → plaintext community; role `ssh` → name = username,
+   plaintext = password). Plugin credentials take precedence over site-wide ones.
 
 ## NetBox objects it maintains
 

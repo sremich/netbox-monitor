@@ -15,6 +15,8 @@ and scanning scope.</p>
         DNS {{ 'on' if site.dns_enabled else 'off' }}</li>
     <li>Proxmox: {% if site.proxmox %}{{ site.proxmox | map(attribute='host') | join(', ') }}
         ({{ 'on' if site.proxmox_enabled else 'off' }}){% else %}none{% endif %}</li>
+    <li>LLDP: {{ 'on' if site.lldp.enabled else 'off' }}
+        {% if site.lldp.enabled %}(SNMP{{ ' + SSH' if site.lldp.ssh_username else '' }}){% endif %}</li>
     <li>Discovery: {{ 'on' if site.discovery.enabled else 'off' }} —
         {% if site.discovery.include_prefixes %}{{ site.discovery.include_prefixes | join(', ') }}
         {% else %}all prefixes scoped to this NetBox site{% endif %}

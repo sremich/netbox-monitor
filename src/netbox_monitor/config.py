@@ -72,6 +72,19 @@ class SiteDiscoveryConfig(BaseModel):
     exclude_prefixes: list[str] = Field(default_factory=list)
 
 
+class SiteLldpConfig(BaseModel):
+    """Per-site LLDP credentials for the site's switches (tagged ``lldp-source``).
+
+    The netbox-secrets plugin (global lldp settings) still wins when it holds
+    credentials for a specific switch.
+    """
+
+    enabled: bool = False
+    snmp_community: str = ""  # for SNMP-polled switches
+    ssh_username: str = ""  # for UniFi (SSH + lldpd) switches
+    ssh_password: str = ""
+
+
 class SiteConfig(BaseModel):
     id: str  # internal slug, unique
     name: str  # display name
@@ -80,6 +93,7 @@ class SiteConfig(BaseModel):
     technitium: TechnitiumConfig | None = None
     proxmox: list[ProxmoxInstance] = Field(default_factory=list)
     discovery: SiteDiscoveryConfig = Field(default_factory=SiteDiscoveryConfig)
+    lldp: SiteLldpConfig = Field(default_factory=SiteLldpConfig)
     dhcp_enabled: bool = True
     dns_enabled: bool = True
     proxmox_enabled: bool = True

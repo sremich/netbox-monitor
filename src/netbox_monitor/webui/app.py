@@ -19,6 +19,7 @@ from netbox_monitor.config import (
     ProxmoxInstance,
     SiteConfig,
     SiteDiscoveryConfig,
+    SiteLldpConfig,
     TechnitiumConfig,
 )
 from netbox_monitor.scheduler import Engine
@@ -460,6 +461,16 @@ def _site_from_form(form: Any, existing: SiteConfig | None) -> SiteConfig:
     include = form.getlist("include_prefixes") + _csv_list(str(form.get("include_extra") or ""))
     exclude = form.getlist("exclude_prefixes") + _csv_list(str(form.get("exclude_extra") or ""))
 
+    # LLDP: blank secret fields keep the stored values
+    prev_lldp = existing.lldp if existing else SiteLldpConfig()
+    lldp = SiteLldpConfig(
+        enabled=form.get("lldp_enabled") == "on",
+        snmp_community=str(form.get("lldp_snmp_community") or "").strip()
+        or prev_lldp.snmp_community,
+        ssh_username=str(form.get("lldp_ssh_username") or "").strip(),
+        ssh_password=str(form.get("lldp_ssh_password") or "").strip() or prev_lldp.ssh_password,
+    )
+
     return SiteConfig(
         id=site_id,
         name=name,
@@ -472,6 +483,7 @@ def _site_from_form(form: Any, existing: SiteConfig | None) -> SiteConfig:
             include_prefixes=sorted(set(map(str, include))),
             exclude_prefixes=sorted(set(map(str, exclude))),
         ),
+        lldp=lldp,
         dhcp_enabled=form.get("dhcp_enabled") == "on",
         dns_enabled=form.get("dns_enabled") == "on",
         proxmox_enabled=form.get("proxmox_enabled") == "on",

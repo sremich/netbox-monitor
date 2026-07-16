@@ -77,6 +77,9 @@ class FakeEndpoint:
         if key == "device_id":
             device = getattr(record, "device", None)
             return device == value or getattr(device, "id", None) == value
+        if key == "site_id":
+            site = getattr(record, "site", None)
+            return site == value or getattr(site, "id", None) == value
         if key in ("cluster_id", "virtual_machine_id"):
             field = key.rsplit("_", 1)[0]
             obj = getattr(record, field, None)

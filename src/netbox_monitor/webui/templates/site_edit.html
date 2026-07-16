@@ -73,6 +73,29 @@
   </article>
 
   <article>
+    <header><strong>LLDP topology</strong></header>
+    <p><small>Polls this site's switches tagged <code>lldp-source</code> in NetBox and
+    documents the discovered links as cables. UniFi-platform switches are queried over
+    SSH (lldpd); everything else over SNMP. Per-switch credentials from the
+    netbox-secrets plugin take precedence over these site-wide ones.</small></p>
+    <label><input type="checkbox" name="lldp_enabled"
+                  {% if site.lldp.enabled %}checked{% endif %}> Enable LLDP topology mapping</label>
+    <label>SNMP community (SNMP switches)
+      <input type="password" name="lldp_snmp_community"
+             placeholder="{{ '•••••••• (unchanged if blank)' if site.lldp.snmp_community else 'public' }}">
+    </label>
+    <div class="grid">
+      <label>SSH username (UniFi switches)
+        <input type="text" name="lldp_ssh_username" value="{{ site.lldp.ssh_username }}">
+      </label>
+      <label>SSH password
+        <input type="password" name="lldp_ssh_password"
+               placeholder="{{ '•••••••• (unchanged if blank)' if site.lldp.ssh_password else 'password' }}">
+      </label>
+    </div>
+  </article>
+
+  <article>
     <header><strong>Discovery scanning scope</strong></header>
     <label><input type="checkbox" name="discovery_enabled"
                   {% if site.discovery.enabled %}checked{% endif %}> Enable ping discovery</label>
