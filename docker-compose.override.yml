@@ -1,9 +1,0 @@
-# Local override for running under WSL2 / Docker Desktop, where host networking
-# is unreachable from Windows. Uses a normal bridge network with a published port.
-# (On a real Linux host, delete this file to get host networking back for
-# full ping/ARP discovery.)
-services:
-  netbox-monitor:
-    network_mode: bridge
-    ports:
-      - "8899:8899"

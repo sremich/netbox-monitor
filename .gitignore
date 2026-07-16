@@ -12,3 +12,4 @@ dist/
 build/
 *.db
 *.log
+docker-compose.override.yml
