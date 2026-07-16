@@ -1,0 +1,110 @@
+"""UniFi SSH LLDP driver: UniFi switches run Linux with lldpd, so we SSH in and
+parse ``lldpcli show neighbors -f json``.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import asyncssh
+import structlog
+
+from netbox_monitor.lldp import LldpNeighbor
+from netbox_monitor.oui import normalize_mac
+
+log = structlog.get_logger(__name__)
+
+COMMANDS = [
+    "lldpcli show neighbors details -f json",
+    "lldpcli show neighbors -f json",
+    "lldpctl -f json",
+]
+
+
+def _as_items(value: Any) -> list[tuple[str, dict]]:
+    """lldpd JSON is inconsistent: dicts keyed by name, or lists of such dicts."""
+    if isinstance(value, dict):
+        return list(value.items())
+    if isinstance(value, list):
+        items: list[tuple[str, dict]] = []
+        for entry in value:
+            if isinstance(entry, dict):
+                items.extend(entry.items())
+        return items
+    return []
+
+
+def _first(value: Any) -> Any:
+    return value[0] if isinstance(value, list) and value else value
+
+
+def parse_lldpcli_json(payload: str) -> list[LldpNeighbor]:
+    data = json.loads(payload)
+    neighbors: list[LldpNeighbor] = []
+    interfaces = (data.get("lldp") or {}).get("interface") or []
+    for ifname, detail in _as_items(interfaces):
+        if not isinstance(detail, dict):
+            continue
+        sysname = None
+        chassis_mac = None
+        chassis = detail.get("chassis") or {}
+        if isinstance(chassis, dict):
+            # either {"<sysname>": {...}} or a flat {"id": ..., "name": ...}
+            if "id" in chassis or "name" in chassis:
+                chassis_entries = [(chassis.get("name"), chassis)]
+            else:
+                chassis_entries = list(chassis.items())
+            for name, body in chassis_entries:
+                sysname = name if isinstance(name, str) else sysname
+                if isinstance(body, dict):
+                    cid = _first(body.get("id"))
+                    if isinstance(cid, dict) and cid.get("type") == "mac":
+                        chassis_mac = normalize_mac(str(cid.get("value", "")))
+                    if not sysname and isinstance(body.get("name"), str):
+                        sysname = body["name"]
+                break
+
+        remote_port = None
+        remote_port_is_mac = False
+        port = detail.get("port") or {}
+        if isinstance(port, dict):
+            pid = _first(port.get("id"))
+            if isinstance(pid, dict):
+                remote_port = str(pid.get("value", "")) or None
+                remote_port_is_mac = pid.get("type") == "mac"
+            descr = port.get("descr")
+            if remote_port_is_mac and isinstance(descr, str) and descr:
+                # prefer the human-readable port description over a MAC when present
+                remote_port, remote_port_is_mac = descr, False
+
+        neighbors.append(
+            LldpNeighbor(
+                local_port=ifname,
+                chassis_mac=chassis_mac,
+                sysname=sysname,
+                remote_port=remote_port,
+                remote_port_is_mac=remote_port_is_mac,
+            )
+        )
+    return neighbors
+
+
+async def collect(host: str, username: str, password: str) -> list[LldpNeighbor]:
+    async with asyncssh.connect(
+        host,
+        username=username,
+        password=password,
+        known_hosts=None,  # home-lab switches; host keys unmanaged
+        connect_timeout=10,
+    ) as conn:
+        last_error = ""
+        for command in COMMANDS:
+            result = await conn.run(command, check=False)
+            stdout = (result.stdout or "").strip()
+            if result.exit_status == 0 and stdout.startswith("{"):
+                neighbors = parse_lldpcli_json(stdout)
+                log.info("unifi lldp neighbors collected", host=host, count=len(neighbors))
+                return neighbors
+            last_error = (result.stderr or stdout or "").strip()[:200]
+        raise RuntimeError(f"no lldp output from {host}: {last_error}")

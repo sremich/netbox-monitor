@@ -1,0 +1,19 @@
+services:
+  netbox-monitor:
+    image: ghcr.io/sremich/netbox-monitor:latest
+    build: .
+    restart: unless-stopped
+    # host networking: ping sweeps + ARP need to sit on the real LAN,
+    # ideally on a host with interfaces in every scanned VLAN
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    env_file: .env
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - netbox-monitor-data:/app/data
+      # - ./secrets_private_key.pem:/app/secrets_private_key.pem:ro
+
+volumes:
+  netbox-monitor-data:
