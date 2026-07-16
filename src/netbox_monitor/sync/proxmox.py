@@ -13,7 +13,7 @@ import structlog
 from netbox_monitor.clients.netbox import MANAGED_TAG_SLUG, STALE_TAG_SLUG, NetBoxClient
 from netbox_monitor.clients.proxmox import ProxmoxClient
 from netbox_monitor.context import Context
-from netbox_monitor.sync.common import now_iso, upsert_ip
+from netbox_monitor.sync.common import now_iso, set_interface_mac, upsert_ip
 
 log = structlog.get_logger(__name__)
 
@@ -221,10 +221,10 @@ class ProxmoxSync:
                 {
                     "virtual_machine": vm.id,
                     "tags": nb.tag_ids(MANAGED_TAG_SLUG, SRC),
-                    "mac_address": mac,
                 },
             )
             if iface is not None:
+                set_interface_mac(nb, iface, mac, object_type="virtualization.vminterface")
                 iface_objs[net_name] = iface
 
         ips: list[str] = []

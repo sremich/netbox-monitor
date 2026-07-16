@@ -95,6 +95,76 @@ def test_reserved_lease_creates_device(ctx):
     assert len(ctx.netbox.api.ipam.ip_addresses.items) == 1
 
 
+def make_vm_with_mac(nb, name, mac, managed=True):
+    vm = nb.api.virtualization.virtual_machines.create(
+        name=name,
+        status="active",
+        primary_ip4=None,
+        tags=nb.tag_ids(MANAGED_TAG_SLUG, "src-proxmox") if managed else [],
+    )
+    iface = nb.api.virtualization.interfaces.create(virtual_machine=vm, name="net0")
+    # NetBox >= 4.2 model: MACs are standalone objects assigned to interfaces
+    nb.api.dcim.mac_addresses.create(
+        mac_address=mac,
+        assigned_object_type="virtualization.vminterface",
+        assigned_object_id=iface.id,
+    )
+    return vm, iface
+
+
+def test_dynamic_lease_links_to_vm_by_mac(ctx):
+    nb = ctx.netbox
+    vm, iface = make_vm_with_mac(nb, "jellyfin", "24:A4:3C:AA:BB:CC")
+
+    sync = DhcpSync(ctx)
+    sync._reconcile(SCOPES, [dynamic_lease()])  # same MAC as the VM interface
+
+    ips = nb.api.ipam.ip_addresses.items
+    assert len(ips) == 1
+    assert ips[0].assigned_object_type == "virtualization.vminterface"
+    assert ips[0].assigned_object_id == iface.id
+    assert vm.primary_ip4 == ips[0].id
+
+    # lease expires: the IP is deleted even though it was assigned to a VM interface
+    sync._reconcile(SCOPES, [])
+    assert nb.api.ipam.ip_addresses.items == []
+
+
+def test_dynamic_lease_does_not_claim_unmanaged_vm(ctx):
+    nb = ctx.netbox
+    vm, _iface = make_vm_with_mac(nb, "handmade-vm", "24:A4:3C:AA:BB:CC", managed=False)
+    sync = DhcpSync(ctx)
+    sync._reconcile(SCOPES, [dynamic_lease()])
+    # the IP is still linked to the interface, but a human-made VM's primary is not touched
+    assert nb.api.ipam.ip_addresses.items[0].assigned_object_type == ("virtualization.vminterface")
+    assert vm.primary_ip4 is None
+
+
+def test_reserved_lease_for_vm_attaches_and_dedupes(ctx):
+    nb = ctx.netbox
+    sync = DhcpSync(ctx)
+
+    # first pass: VM not in NetBox yet -> a device gets created for the reservation
+    sync._reconcile(SCOPES, [reserved_lease()])
+    assert nb.api.dcim.devices.get(name="nas") is not None
+
+    # proxmox sync later documents the guest with the same MAC
+    vm, iface = make_vm_with_mac(nb, "nas", "24:A4:3C:11:22:33")
+
+    # next pass: the duplicate device is removed, IP moves to the VM interface
+    sync._reconcile(SCOPES, [reserved_lease()])
+    assert nb.api.dcim.devices.get(name="nas") is None
+    ips = nb.api.ipam.ip_addresses.items
+    assert len(ips) == 1
+    assert ips[0].assigned_object_type == "virtualization.vminterface"
+    assert ips[0].assigned_object_id == iface.id
+    assert vm.primary_ip4 == ips[0].id
+
+    # reserved IPs are never deleted, even when assigned to a VM interface
+    sync._reconcile(SCOPES, [reserved_lease()])
+    assert len(nb.api.ipam.ip_addresses.items) == 1
+
+
 def test_scope_annotates_prefix(ctx):
     prefix = ctx.netbox.api.ipam.prefixes.create(prefix="10.200.10.0/24", status="active")
     sync = DhcpSync(ctx)

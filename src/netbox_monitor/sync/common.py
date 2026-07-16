@@ -100,6 +100,80 @@ def upsert_ip(
     return obj
 
 
+def find_interface_by_mac(nb: NetBoxClient, mac: str) -> tuple[str, Any, Any] | None:
+    """Find the interface carrying ``mac``: VM interfaces preferred over device ones.
+
+    Returns (assigned_object_type, interface, parent_ref) or None.
+    """
+    try:
+        if _netbox_version(nb) >= (4, 2):
+            with nb.lock:
+                mac_objs = list(nb.api.dcim.mac_addresses.filter(mac_address=mac))
+            candidates: dict[str, Any] = {}
+            for mac_obj in mac_objs:
+                obj_type = str(getattr(mac_obj, "assigned_object_type", "") or "")
+                obj_id = getattr(mac_obj, "assigned_object_id", None)
+                if obj_id and obj_type not in candidates:
+                    candidates[obj_type] = obj_id
+            for obj_type, endpoint, parent_attr in (
+                ("virtualization.vminterface", nb.api.virtualization.interfaces, "virtual_machine"),
+                ("dcim.interface", nb.api.dcim.interfaces, "device"),
+            ):
+                if obj_type in candidates:
+                    with nb.lock:
+                        iface = endpoint.get(candidates[obj_type])
+                    if iface is not None:
+                        return (obj_type, iface, getattr(iface, parent_attr, None))
+        else:
+            with nb.lock:
+                vm_ifaces = list(nb.api.virtualization.interfaces.filter(mac_address=mac))
+            if vm_ifaces:
+                iface = vm_ifaces[0]
+                return (
+                    "virtualization.vminterface",
+                    iface,
+                    getattr(iface, "virtual_machine", None),
+                )
+            with nb.lock:
+                dev_ifaces = list(nb.api.dcim.interfaces.filter(mac_address=mac))
+            if dev_ifaces:
+                iface = dev_ifaces[0]
+                return ("dcim.interface", iface, getattr(iface, "device", None))
+    except Exception as exc:
+        log.debug("interface-by-MAC lookup failed", mac=mac, error=str(exc))
+    return None
+
+
+def link_primary_ip(
+    nb: NetBoxClient, object_type: str, parent_ref: Any, ip_obj: Any, iface: Any
+) -> None:
+    """Set ``ip_obj`` as the parent's primary IPv4 if it doesn't have one yet.
+
+    Only touches parents managed by this service, and only when the IP is actually
+    assigned to ``iface`` (human-owned IP records are never reassigned, so their
+    hosts can't be linked automatically).
+    """
+    if parent_ref is None or ip_obj is None or iface is None:
+        return
+    if getattr(ip_obj, "assigned_object_id", None) != iface.id:
+        log.info(
+            "IP not assigned to the matched interface (human-owned record?); primary IP not linked",
+            ip=str(getattr(ip_obj, "address", ip_obj)),
+        )
+        return
+    endpoint = (
+        nb.api.virtualization.virtual_machines
+        if object_type == "virtualization.vminterface"
+        else nb.api.dcim.devices
+    )
+    with nb.lock:
+        parent = endpoint.get(parent_ref.id)
+    if parent is None or not nb.is_managed(parent):
+        return
+    if getattr(parent, "primary_ip4", None) is None:
+        nb.update(parent, {"primary_ip4": ip_obj.id}, reason="link DHCP lease as primary IP")
+
+
 def ensure_discovered_device_type(nb: NetBoxClient, vendor: str | None) -> tuple[Any, Any]:
     """Manufacturer + a generic '<Vendor> discovered device' type."""
     vendor = (vendor or UNKNOWN_VENDOR)[:100]
@@ -116,26 +190,51 @@ def ensure_discovered_device_type(nb: NetBoxClient, vendor: str | None) -> tuple
     return manufacturer, device_type
 
 
-def set_interface_mac(nb: NetBoxClient, interface: Any, mac: str) -> None:
-    """Assign a MAC to an interface, tolerating both pre- and post-4.2 NetBox models."""
+def _netbox_version(nb: NetBoxClient) -> tuple[int, int]:
     try:
-        if getattr(interface, "mac_address", None) == mac:
-            return
-        nb.update(interface, {"mac_address": mac}, reason="set MAC")
+        major, minor = (int(x) for x in str(nb.api.version).split(".")[:2])
+        return (major, minor)
     except Exception:
-        # NetBox >= 4.2: MACs are standalone objects
-        try:
+        return (4, 2)
+
+
+def set_interface_mac(
+    nb: NetBoxClient, interface: Any, mac: str, object_type: str = "dcim.interface"
+) -> None:
+    """Assign a MAC to a device or VM interface.
+
+    NetBox >= 4.2 stores MACs as standalone ``dcim.mac_addresses`` objects
+    (writing ``mac_address`` on the interface is silently ignored there);
+    older versions take the field directly.
+    """
+    try:
+        if _netbox_version(nb) >= (4, 2):
+            # NetBox's MAC filter doesn't accept assigned_object_type; match client-side
             with nb.lock:
-                existing = list(nb.api.dcim.mac_addresses.filter(mac_address=mac))
-            if not existing:
-                nb.create(
+                candidates = list(nb.api.dcim.mac_addresses.filter(mac_address=mac))
+            mac_obj = next(
+                (
+                    m
+                    for m in candidates
+                    if str(getattr(m, "assigned_object_type", "")) == object_type
+                    and getattr(m, "assigned_object_id", None) == interface.id
+                ),
+                None,
+            )
+            if mac_obj is None:
+                mac_obj = nb.create(
                     nb.api.dcim.mac_addresses,
                     mac_address=mac,
-                    assigned_object_type="dcim.interface",
+                    assigned_object_type=object_type,
                     assigned_object_id=interface.id,
                 )
-        except Exception as exc:
-            log.debug("could not set interface MAC", mac=mac, error=str(exc))
+            if mac_obj is not None and getattr(interface, "primary_mac_address", None) is None:
+                nb.update(interface, {"primary_mac_address": mac_obj.id}, reason="set primary MAC")
+        else:
+            if getattr(interface, "mac_address", None) != mac:
+                nb.update(interface, {"mac_address": mac}, reason="set MAC")
+    except Exception as exc:
+        log.debug("could not set interface MAC", mac=mac, error=str(exc))
 
 
 def ensure_host_device(
@@ -153,15 +252,10 @@ def ensure_host_device(
     device = None
     # prefer identifying an existing device by its interface MAC (survives renames)
     if mac:
-        try:
+        match = find_interface_by_mac(nb, mac)
+        if match and match[0] == "dcim.interface" and match[2] is not None:
             with nb.lock:
-                ifaces = list(nb.api.dcim.interfaces.filter(mac_address=mac))
-            for iface in ifaces:
-                if iface.device:
-                    device = nb.api.dcim.devices.get(iface.device.id)
-                    break
-        except Exception as exc:
-            log.debug("MAC-based device lookup failed", mac=mac, error=str(exc))
+                device = nb.api.dcim.devices.get(match[2].id)
     if device is None:
         with nb.lock:
             device = nb.api.dcim.devices.get(name=name)
