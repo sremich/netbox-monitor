@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}First-run setup — netbox-monitor{% endblock %}
+{% block content %}
+<article style="max-width: 28rem; margin: 4rem auto;">
+  <h3>Welcome to netbox-monitor</h3>
+  <p>Set a password to protect this UI — it will hold your API tokens.</p>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <form method="post" action="/setup">
+    <input type="password" name="password" placeholder="Password (min 8 chars)" minlength="8" required>
+    <input type="password" name="confirm" placeholder="Confirm password" minlength="8" required>
+    <button type="submit">Set password &amp; continue</button>
+  </form>
+</article>
+{% endblock %}

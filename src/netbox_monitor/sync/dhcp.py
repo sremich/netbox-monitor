@@ -1,8 +1,10 @@
-"""DHCP sync: mirror Technitium DHCP leases into NetBox.
+"""DHCP sync: mirror Technitium DHCP leases into NetBox, per site.
 
-- Dynamic leases  -> IPAddress objects (status ``dhcp``); deleted when the lease goes away.
-- Reserved leases -> full Devices (static infrastructure), never deleted (stale-tagged
-  by the availability monitor instead).
+- Dynamic leases  -> IPAddress objects (status ``dhcp``); deleted when the lease goes
+  away. Leases whose MAC matches a VM/device interface get their IP assigned there
+  and linked as the parent's primary IP.
+- Reserved leases -> full Devices (static infrastructure), never deleted; when the MAC
+  belongs to a Proxmox VM the reservation attaches to the VM instead.
 - DHCP scope definitions -> ``dhcp_scope`` custom field on matching NetBox prefixes.
 """
 
@@ -10,11 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import time
 from typing import Any
 
 import structlog
 
-from netbox_monitor.context import Context
+from netbox_monitor.context import Context, ResolvedSite
 from netbox_monitor.net_utils import sanitize_dns_name
 from netbox_monitor.oui import normalize_mac
 from netbox_monitor.sync.common import (
@@ -45,15 +48,53 @@ class DhcpSync:
     def __init__(self, ctx: Context):
         self.ctx = ctx
 
+    def _sites(self) -> list[ResolvedSite]:
+        return [s for s in self.ctx.sites if s.technitium is not None and s.config.dhcp_enabled]
+
     async def run(self) -> None:
+        sites = self._sites()
+        if not sites:
+            log.info("no sites with Technitium DHCP configured")
+            return
         await self.ctx.oui.ensure_loaded()
-        scopes = await self.ctx.technitium.list_dhcp_scopes()
-        leases = await self.ctx.technitium.list_dhcp_leases()
-        await asyncio.to_thread(self._reconcile, scopes, leases)
+
+        all_active: set[str] = set()
+        all_reserved: set[str] = set()
+        any_failed = False
+        for site in sites:
+            started = time.monotonic()
+            try:
+                scopes = await site.technitium.list_dhcp_scopes()
+                leases = await site.technitium.list_dhcp_leases()
+                active, reserved = await asyncio.to_thread(
+                    self._reconcile_site, site, scopes, leases
+                )
+                all_active |= active
+                all_reserved |= reserved
+                await self.ctx.status.record(
+                    self.name,
+                    site.config.id,
+                    True,
+                    f"{len(active)} dynamic, {len(reserved)} reserved leases",
+                    time.monotonic() - started,
+                )
+            except Exception as exc:
+                any_failed = True
+                log.exception("dhcp sync failed for site", site=site.config.id)
+                await self.ctx.status.record(
+                    self.name, site.config.id, False, str(exc), time.monotonic() - started
+                )
+
+        # never run the delete pass on partial data — a failed site's leases would
+        # all look expired
+        if self.ctx.config.lifecycle.delete_dhcp_on_expiry and not any_failed:
+            await asyncio.to_thread(self._delete_expired, all_active, all_reserved)
 
     # ------------------------------------------------------------------ sync
 
-    def _reconcile(self, scopes: list[dict], leases: list[dict]) -> None:
+    def _reconcile_site(
+        self, site: ResolvedSite, scopes: list[dict], leases: list[dict]
+    ) -> tuple[set[str], set[str]]:
         nb = self.ctx.netbox
         self._annotate_prefixes(scopes)
 
@@ -85,6 +126,7 @@ class DhcpSync:
                             name=hostname.split(".")[0] if hostname else f"reserved-{address}",
                             ip=address,
                             source_slug=SRC,
+                            site_id=site.netbox_site_id,
                             mac=mac,
                             vendor=vendor,
                             dns_name=hostname,
@@ -116,9 +158,7 @@ class DhcpSync:
                         link_primary_ip(nb, assigned_type, parent_ref, ip_obj, assigned_iface)
             except Exception:
                 log.exception("failed to sync lease", address=address, type=lease_type)
-
-        if self.ctx.config.lifecycle.delete_dhcp_on_expiry:
-            self._delete_expired(active_dynamic, reserved_addresses)
+        return active_dynamic, reserved_addresses
 
     def _attach_reservation_to_vm(
         self,

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — netbox-monitor{% endblock %}
+{% block content %}
+<h2>Dashboard</h2>
+
+{% if not config.netbox.configured %}
+<article class="warn">NetBox is not configured yet — set the URL and token in
+  <a href="/settings">Settings</a>.</article>
+{% endif %}
+{% if config.dry_run %}
+<article class="warn">Dry-run mode is ON — no changes are written to NetBox.</article>
+{% endif %}
+
+<div class="grid-cards">
+{% for module in modules %}
+  {% set mod_status = snapshot.get(module, {}) %}
+  {% set run = mod_status.get('_run') %}
+  <article>
+    <header>
+      <strong>{{ module_labels[module] }}</strong>
+      <button class="outline small" hx-post="/run/{{ module }}" hx-swap="innerHTML"
+              hx-target="#flash-{{ module }}">Run now</button>
+      <span id="flash-{{ module }}"></span>
+    </header>
+    {% if run %}
+      <p class="{{ 'ok' if run.ok else 'error' }}">
+        {{ '✅ ok' if run.ok else '❌ ' + run.message }}
+        <small>({{ run.duration }}s, {{ run.ts | timestamp }})</small>
+      </p>
+    {% else %}
+      <p><small>never run</small></p>
+    {% endif %}
+    {% for scope, entry in mod_status.items() if scope != '_run' %}
+      <p><small>
+        <strong>{{ scope }}</strong>:
+        <span class="{{ 'ok' if entry.ok else 'error' }}">{{ entry.message }}</span>
+        ({{ entry.ts | timestamp }})
+      </small></p>
+    {% endfor %}
+  </article>
+{% endfor %}
+</div>
+
+<h3>Sites</h3>
+{% if config.sites %}
+<table>
+  <thead><tr><th>Site</th><th>NetBox site</th><th>Technitium</th><th>Proxmox</th><th>Discovery</th></tr></thead>
+  <tbody>
+  {% for site in config.sites %}
+    <tr>
+      <td><a href="/sites/{{ site.id }}">{{ site.name }}</a></td>
+      <td>{{ site.netbox_site }}</td>
+      <td>{{ site.technitium.url if site.technitium else '—' }}</td>
+      <td>{{ site.proxmox | length }} instance(s)</td>
+      <td>{{ 'on' if site.discovery.enabled else 'off' }}
+          ({{ site.discovery.include_prefixes | length or 'site' }} prefixes)</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No sites configured. <a href="/sites/new">Add your first site</a>.</p>
+{% endif %}
+{% endblock %}

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import time
 from typing import Any
 
 import structlog
@@ -30,14 +31,26 @@ class ProxmoxSync:
         self._disk_in_mb: bool | None = None
 
     async def run(self) -> None:
-        if not self.ctx.config.proxmox:
-            log.info("no proxmox instances configured")
+        sites = [s for s in self.ctx.sites if s.config.proxmox and s.config.proxmox_enabled]
+        if not sites:
+            log.info("no sites with proxmox instances configured")
             return
-        for instance in self.ctx.config.proxmox:
-            try:
-                await asyncio.to_thread(self._sync_instance, instance)
-            except Exception:
-                log.exception("proxmox instance sync failed", host=instance.host)
+        for site in sites:
+            started = time.monotonic()
+            errors = []
+            for instance in site.config.proxmox:
+                try:
+                    await asyncio.to_thread(self._sync_instance, instance, site.netbox_site_id)
+                except Exception as exc:
+                    errors.append(f"{instance.host}: {exc}")
+                    log.exception("proxmox instance sync failed", host=instance.host)
+            await self.ctx.status.record(
+                self.name,
+                site.config.id,
+                not errors,
+                "; ".join(errors) or f"{len(site.config.proxmox)} instance(s) synced",
+                time.monotonic() - started,
+            )
 
     # ---------------------------------------------------------------- helpers
 
@@ -53,7 +66,7 @@ class ProxmoxSync:
 
     # ------------------------------------------------------------------ sync
 
-    def _sync_instance(self, instance_cfg: Any) -> None:
+    def _sync_instance(self, instance_cfg: Any, site_id: int | None) -> None:
         nb = self.ctx.netbox
         client = ProxmoxClient(instance_cfg)
         cluster_name = client.cluster_name()
@@ -64,14 +77,16 @@ class ProxmoxSync:
             {"slug": "proxmox-ve"},
             {"name": "Proxmox VE"},
         )
+        cluster_defaults: dict[str, Any] = {
+            "type": cluster_type.id if cluster_type else None,
+            "status": "active",
+            "tags": nb.tag_ids(MANAGED_TAG_SLUG, SRC),
+        }
+        if site_id is not None:
+            cluster_defaults["scope_type"] = "dcim.site"
+            cluster_defaults["scope_id"] = site_id
         cluster = nb.ensure(
-            nb.api.virtualization.clusters,
-            {"name": cluster_name},
-            {
-                "type": cluster_type.id if cluster_type else None,
-                "status": "active",
-                "tags": nb.tag_ids(MANAGED_TAG_SLUG, SRC),
-            },
+            nb.api.virtualization.clusters, {"name": cluster_name}, cluster_defaults
         )
         if cluster is None:  # dry-run and cluster missing
             log.info("dry-run: cluster not present; skipping detail sync", cluster=cluster_name)
@@ -93,7 +108,7 @@ class ProxmoxSync:
         node_devices: dict[str, Any] = {}
         seen_vm_names: set[str] = set()
         for node in client.nodes():
-            device = self._sync_node(nb, node, cluster, node_type)
+            device = self._sync_node(nb, node, cluster, node_type, site_id)
             if device is not None:
                 node_devices[node["node"]] = device
 
@@ -114,7 +129,12 @@ class ProxmoxSync:
 
         self._mark_vanished(nb, cluster, seen_vm_names)
 
-    def _sync_node(self, nb: NetBoxClient, node: dict, cluster: Any, node_type: Any) -> Any:
+    def _sync_node(
+        self, nb: NetBoxClient, node: dict, cluster: Any, node_type: Any, site_id: int | None
+    ) -> Any:
+        if site_id is None:
+            log.warning("no NetBox site resolved for proxmox node; skipping", node=node["node"])
+            return None
         status = "active" if node.get("status") == "online" else "offline"
         device = nb.ensure(
             nb.api.dcim.devices,
@@ -122,7 +142,7 @@ class ProxmoxSync:
             {
                 "role": nb.refs.get("role_hypervisor"),
                 "device_type": node_type.id if node_type else None,
-                "site": nb.refs.get("site"),
+                "site": site_id,
                 "cluster": cluster.id,
                 "status": status,
                 "tags": nb.tag_ids(MANAGED_TAG_SLUG, SRC),

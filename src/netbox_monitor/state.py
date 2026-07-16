@@ -105,3 +105,10 @@ class StateDB:
             (key, value),
         )
         await self.db.commit()
+
+    async def list_kv(self, prefix: str) -> dict[str, str]:
+        async with self.db.execute(
+            "SELECT key, value FROM kv WHERE key LIKE ?", (prefix + "%",)
+        ) as cur:
+            rows = await cur.fetchall()
+        return {row[0]: row[1] for row in rows}

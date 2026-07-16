@@ -96,11 +96,4 @@ def bootstrap(nb: NetBoxClient, config: AppConfig) -> None:
         )
         nb.refs[f"role_{slug}"] = role.id if role else None
 
-    site = nb.ensure(
-        nb.api.dcim.sites,
-        {"slug": slugify(config.netbox.default_site)},
-        {"name": config.netbox.default_site, "status": "active"},
-    )
-    nb.refs["site"] = site.id if site else None
-
     log.info("bootstrap complete", refs=nb.refs)

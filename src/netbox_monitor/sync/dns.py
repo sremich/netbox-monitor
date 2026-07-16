@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import time
 
 import structlog
 
@@ -46,11 +47,36 @@ class DnsSync:
         self.ctx = ctx
 
     async def run(self) -> None:
-        zones = await self.ctx.technitium.list_zones()
+        sites = [s for s in self.ctx.sites if s.technitium is not None and s.config.dns_enabled]
+        if not sites:
+            log.info("no sites with Technitium DNS configured")
+            return
+
         forward: dict[str, str] = {}  # ip -> fqdn (A/AAAA)
         ptr: dict[str, str] = {}  # ip -> fqdn (PTR)
-        all_names: set[str] = set()
+        for site in sites:
+            started = time.monotonic()
+            try:
+                count = await self._collect_site(site, forward, ptr)
+                await self.ctx.status.record(
+                    self.name,
+                    site.config.id,
+                    True,
+                    f"{count} records collected",
+                    time.monotonic() - started,
+                )
+            except Exception as exc:
+                log.exception("dns collection failed for site", site=site.config.id)
+                await self.ctx.status.record(
+                    self.name, site.config.id, False, str(exc), time.monotonic() - started
+                )
 
+        log.info("dns records collected", a_aaaa=len(forward), ptr=len(ptr))
+        await asyncio.to_thread(self._reconcile, forward, ptr)
+
+    async def _collect_site(self, site, forward: dict[str, str], ptr: dict[str, str]) -> int:
+        count = 0
+        zones = await site.technitium.list_zones()
         for zone in zones:
             zone_name = zone.get("name", "")
             if zone.get("type") not in ("Primary", "Forwarder", "Stub", "Secondary"):
@@ -60,7 +86,7 @@ class DnsSync:
             if zone.get("disabled"):
                 continue
             try:
-                records = await self.ctx.technitium.get_zone_records(zone_name)
+                records = await site.technitium.get_zone_records(zone_name)
             except Exception as exc:
                 log.warning("failed to read zone", zone=zone_name, error=str(exc))
                 continue
@@ -72,16 +98,14 @@ class DnsSync:
                     ip = rdata.get("ipAddress")
                     if ip and name:
                         forward.setdefault(ip, name)
-                        all_names.add(name)
+                        count += 1
                 elif rtype == "PTR":
                     target = sanitize_dns_name(rdata.get("ptrName"))
                     ip = ptr_name_to_ip(record.get("name", ""))
                     if ip and target:
                         ptr.setdefault(ip, target)
-                        all_names.add(target)
-
-        log.info("dns records collected", a_aaaa=len(forward), ptr=len(ptr))
-        await asyncio.to_thread(self._reconcile, forward, ptr)
+                        count += 1
+        return count
 
     def _reconcile(self, forward: dict[str, str], ptr: dict[str, str]) -> None:
         nb = self.ctx.netbox

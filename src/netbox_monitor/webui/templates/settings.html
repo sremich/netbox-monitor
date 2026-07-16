@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Settings — netbox-monitor{% endblock %}
+{% block content %}
+<h2>Settings</h2>
+{% if saved %}<article class="okbox">Settings saved — sync engine reloading.</article>{% endif %}
+{% if error %}<article class="warn">{{ error }}</article>{% endif %}
+
+<form method="post" action="/settings">
+  <article>
+    <header><strong>NetBox</strong></header>
+    <label>URL
+      <input type="text" name="netbox_url" value="{{ config.netbox.url }}"
+             placeholder="https://netbox.example.com">
+    </label>
+    <label>API token
+      <input type="password" name="netbox_token"
+             placeholder="{{ '•••••••• (unchanged if blank)' if config.netbox.token else 'token' }}">
+    </label>
+    <label><input type="checkbox" name="netbox_verify_ssl"
+                  {% if config.netbox.verify_ssl %}checked{% endif %}> Verify SSL certificate</label>
+    <button type="button" class="outline small" hx-post="/test/netbox"
+            hx-include="closest article" hx-target="#nb-test" hx-swap="innerHTML">Test connection</button>
+    <span id="nb-test"></span>
+  </article>
+
+  <article>
+    <header><strong>Polling intervals &amp; modules</strong></header>
+    <table>
+      <thead><tr><th>Module</th><th>Enabled</th><th>Interval (seconds, ≥15)</th></tr></thead>
+      <tbody>
+      {% for module in modules %}
+        {% set section = config.proxmox_sync if module == 'proxmox' else config[module] %}
+        <tr>
+          <td>{{ module_labels[module] }}</td>
+          <td><input type="checkbox" name="enabled_{{ module }}"
+                     {% if section.enabled %}checked{% endif %}></td>
+          <td><input type="number" name="interval_{{ module }}" min="15"
+                     value="{{ section.interval }}" style="max-width:8rem"></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </article>
+
+  <article>
+    <header><strong>Lifecycle &amp; behavior</strong></header>
+    <label><input type="checkbox" name="delete_dhcp_on_expiry"
+                  {% if config.lifecycle.delete_dhcp_on_expiry %}checked{% endif %}>
+      Delete dynamic DHCP IPs when the lease expires</label>
+    <label>Auto-delete stale records after N days (blank = never)
+      <input type="number" name="stale_grace_delete_days" min="1"
+             value="{{ config.lifecycle.stale_grace_delete_days or '' }}" style="max-width:8rem">
+    </label>
+    <label>Stale after seconds unreachable
+      <input type="number" name="stale_after" min="60"
+             value="{{ config.availability.stale_after }}" style="max-width:8rem">
+    </label>
+    <label><input type="checkbox" name="dry_run" {% if config.dry_run %}checked{% endif %}>
+      Dry-run (log writes without executing)</label>
+    <label>Log level
+      <select name="log_level" style="max-width:10rem">
+        {% for level in ['DEBUG', 'INFO', 'WARNING', 'ERROR'] %}
+        <option value="{{ level }}" {% if config.log_level == level %}selected{% endif %}>{{ level }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </article>
+
+  <article>
+    <header><strong>Web UI</strong></header>
+    <label>Change password (blank = keep)
+      <input type="password" name="new_password" minlength="8" placeholder="new password">
+    </label>
+  </article>
+
+  <button type="submit">Save settings</button>
+</form>
+{% endblock %}

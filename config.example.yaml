@@ -1,79 +1,62 @@
-# netbox-monitor configuration.
-# Copy to config.yaml and adjust. Secrets belong in .env (see .env.example);
-# any value here may reference them as ${VAR} or ${VAR:-default}.
+# netbox-monitor v2 configuration.
+#
+# NOTE: since v2 the *live* configuration is data/settings.json, edited via the
+# web UI (http://<host>:8899). This YAML is only imported on first start when no
+# settings.json exists yet — handy for seeding a deployment. v1 flat configs
+# (top-level technitium/proxmox/discovery) are migrated automatically.
 
 netbox:
-  url: http://netbox.home.lan:8000
+  url: https://netbox.example.com
   token: ${NETBOX_TOKEN}
-  default_site: Home        # site assigned to auto-created devices
   verify_ssl: true
 
-technitium:
-  url: http://10.200.11.2:5380
-  token: ${TECHNITIUM_TOKEN}
+# One entry per site: pairs a NetBox Site with its own Technitium instance,
+# Proxmox instances, and scanning scope.
+sites:
+  - id: home
+    name: Home
+    netbox_site: home            # NetBox site slug (created if missing)
+    technitium:
+      url: http://10.200.11.2:5380
+      token: ${TECHNITIUM_TOKEN}
+    proxmox:
+      - host: 10.200.11.91
+        user: monitor@pve
+        token_name: netbox-monitor
+        token_value: ${PVE_TOKEN}
+        verify_ssl: false
+    discovery:
+      enabled: true
+      include_prefixes: []       # empty = all NetBox prefixes scoped to this site
+      exclude_prefixes: []
+    dhcp_enabled: true
+    dns_enabled: true
+    proxmox_enabled: true
+  # - id: beach-house
+  #   name: Beach House
+  #   netbox_site: beach-house
+  #   technitium: { url: "http://192.168.50.2:5380", token: ${BEACH_TECHNITIUM_TOKEN} }
+  #   discovery: { include_prefixes: ["192.168.50.0/24"] }
 
-# One entry per Proxmox instance/cluster (use an API token: user@realm!tokenname)
-proxmox:
-  - host: 10.200.11.10
-    user: monitor@pve
-    token_name: netbox-monitor
-    token_value: ${PVE_TOKEN}
-    verify_ssl: false
-    # cluster_name: homelab   # optional NetBox cluster name override
-
-dhcp:
-  enabled: true
-  interval: 60               # seconds between lease polls
-
-dns:
-  enabled: true
-  interval: 300
-  zones_exclude: []          # zone names to skip
-
-discovery:
-  enabled: true
-  interval: 900
-  include_prefixes: []       # empty = every active IPv4 prefix in NetBox
-  exclude_prefixes: []       # e.g. ["10.200.99.0/24"]
-  ping_timeout: 1.0
-  concurrency: 128
-  max_hosts_per_prefix: 4096
-
-availability:
-  enabled: true
-  interval: 60
-  stale_after: 600           # 10 minutes unreachable -> tagged stale + offline
-
-proxmox_sync:
-  enabled: true
-  interval: 300
-
-lldp:
-  enabled: false             # enable after tagging switches with `lldp-source` in NetBox
-  interval: 1800
-  source_tag: lldp-source
-  secrets_private_key: ${SECRETS_KEY_PATH:-}   # RSA private key for netbox-secrets plugin
-  platform_drivers:          # NetBox platform slug -> driver; default: snmp (unifi* -> unifi-ssh)
-    unifi: unifi-ssh
-  fallback_creds: {}         # used when netbox-secrets has nothing for a device
-  #  unifi:
-  #    driver: unifi-ssh
-  #    username: admin
-  #    password: ${UNIFI_SSH_PASSWORD}
-  #  edgeswitch:
-  #    driver: snmp
-  #    community: ${SNMP_COMMUNITY}
-
-certs:
-  enabled: true
-  interval: 86400
-  ports: [443, 8443]
-  expiring_days: 30
+# Global module settings (per-module polling intervals are editable in the web UI)
+dhcp: { enabled: true, interval: 60 }
+dns: { enabled: true, interval: 300 }
+discovery: { enabled: true, interval: 900, concurrency: 128 }
+availability: { enabled: true, interval: 60, stale_after: 600 }
+proxmox_sync: { enabled: true, interval: 300 }
+lldp: { enabled: false, interval: 1800 }
+certs: { enabled: true, interval: 86400, expiring_days: 30 }
 
 lifecycle:
-  delete_dhcp_on_expiry: true    # dynamic leases: delete NetBox IP when the lease goes away
-  stale_grace_delete_days: null  # never auto-delete stale records
+  delete_dhcp_on_expiry: true
+  stale_grace_delete_days: null
 
-dry_run: false               # true = log every intended NetBox write without executing
+webui:
+  enabled: true
+  host: 0.0.0.0
+  port: 8899
+  # first visit asks you to set a password, or set WEBUI_PASSWORD in .env
+
+dry_run: false
 data_dir: data
 log_level: INFO

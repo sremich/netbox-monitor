@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Sites — netbox-monitor{% endblock %}
+{% block content %}
+<h2>Sites</h2>
+<p>Each site pairs a NetBox Site with its own Technitium instance, Proxmox instances,
+and scanning scope.</p>
+<p><a href="/sites/new" role="button">＋ Add site</a></p>
+
+{% for site in config.sites %}
+<article>
+  <header><strong>{{ site.name }}</strong> <small>(NetBox site: {{ site.netbox_site }})</small></header>
+  <ul>
+    <li>Technitium: {{ site.technitium.url if site.technitium else 'not configured' }}
+        — DHCP {{ 'on' if site.dhcp_enabled else 'off' }},
+        DNS {{ 'on' if site.dns_enabled else 'off' }}</li>
+    <li>Proxmox: {% if site.proxmox %}{{ site.proxmox | map(attribute='host') | join(', ') }}
+        ({{ 'on' if site.proxmox_enabled else 'off' }}){% else %}none{% endif %}</li>
+    <li>Discovery: {{ 'on' if site.discovery.enabled else 'off' }} —
+        {% if site.discovery.include_prefixes %}{{ site.discovery.include_prefixes | join(', ') }}
+        {% else %}all prefixes scoped to this NetBox site{% endif %}
+        {% if site.discovery.exclude_prefixes %}(excluding {{ site.discovery.exclude_prefixes | join(', ') }}){% endif %}</li>
+  </ul>
+  <footer>
+    <a href="/sites/{{ site.id }}" role="button" class="outline small">Edit</a>
+    <form method="post" action="/sites/{{ site.id }}/delete" style="display:inline"
+          onsubmit="return confirm('Delete site {{ site.name }}? Synced objects in NetBox are kept.');">
+      <button type="submit" class="outline small danger">Delete</button>
+    </form>
+  </footer>
+</article>
+{% else %}
+<p>No sites yet.</p>
+{% endfor %}
+{% endblock %}

@@ -18,6 +18,24 @@ Everything the service creates is tagged `managed:netbox-monitor` plus a source 
 (`src:dhcp`, `src:scan`, `src:proxmox`, `src:lldp`). **It never deletes or lifecycle-edits
 records that don't carry its tags** — your hand-curated documentation is safe.
 
+## Web UI (v2)
+
+v2 ships a built-in web UI at **http://\<host\>:8899**:
+
+- **First run** asks you to set a password (or pre-set `WEBUI_PASSWORD` in `.env`).
+- **Settings**: NetBox URL + token (with a connection test), per-module **polling
+  intervals** and enable switches, lifecycle rules, dry-run toggle, log level.
+- **Sites**: define any number of sites — each pairs a **NetBox Site** (picked from
+  the sites already in your NetBox, or created on the fly) with its own **Technitium
+  instance**, **Proxmox instances**, and **discovery scanning scope** (prefix pickers
+  populated live from NetBox). Every section has a Test button.
+- **Dashboard**: per-module / per-site last-run status and **Run now** buttons.
+
+Configuration edits apply immediately — the sync engine hot-reloads without a restart.
+The live config persists in `data/settings.json` (keep the data volume!); `config.yaml`
+is only imported on first start when no settings.json exists. **v1 configs migrate
+automatically** into a single site.
+
 ## Setup
 
 ### 1. Tokens

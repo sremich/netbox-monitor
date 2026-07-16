@@ -11,9 +11,11 @@ services:
       - NET_ADMIN
     env_file: .env
     volumes:
+      # optional seed config; live settings persist in the data volume (web UI)
       - ./config.yaml:/app/config.yaml:ro
       - netbox-monitor-data:/app/data
       # - ./secrets_private_key.pem:/app/secrets_private_key.pem:ro
+    # web UI: http://<host>:8899 (host networking, no port mapping needed)
 
 volumes:
   netbox-monitor-data:

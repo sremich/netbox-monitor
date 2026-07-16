@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 from netbox_monitor.clients.netbox import ALL_TAGS, NetBoxClient
-from netbox_monitor.config import AppConfig, NetBoxConfig
+from netbox_monitor.config import AppConfig, NetBoxConfig, SiteConfig
+from netbox_monitor.context import ResolvedSite
 
 _ids = itertools.count(1)
 
@@ -154,13 +155,17 @@ def nb() -> NetBoxClient:
     site = client.api.dcim.sites.create(name="Home", slug="home")
     role = client.api.dcim.device_roles.create(name="Discovered", slug="discovered")
     hyper = client.api.dcim.device_roles.create(name="Hypervisor", slug="hypervisor")
-    client.refs = {"site": site.id, "role_discovered": role.id, "role_hypervisor": hyper.id}
+    client.refs = {"role_discovered": role.id, "role_hypervisor": hyper.id}
+    client.home_site_id = site.id  # convenience for tests
     return client
 
 
 @pytest.fixture
 def app_config() -> AppConfig:
-    return AppConfig(netbox=NetBoxConfig(url="http://netbox.test", token="token"))
+    return AppConfig(
+        netbox=NetBoxConfig(url="http://netbox.test", token="token"),
+        sites=[SiteConfig(id="home", name="Home", netbox_site="home")],
+    )
 
 
 class FakeOui:
@@ -171,6 +176,25 @@ class FakeOui:
         return None
 
 
+class FakeStatus:
+    def __init__(self):
+        self.records = []
+
+    async def record(self, module, scope, ok, message="", duration=None):
+        self.records.append((module, scope, ok, message))
+
+    async def snapshot(self):
+        return {}
+
+
 @pytest.fixture
 def ctx(nb, app_config):
-    return SimpleNamespace(config=app_config, netbox=nb, technitium=None, state=None, oui=FakeOui())
+    sites = [ResolvedSite(config=app_config.sites[0], netbox_site_id=nb.home_site_id)]
+    return SimpleNamespace(
+        config=app_config,
+        netbox=nb,
+        state=None,
+        oui=FakeOui(),
+        status=FakeStatus(),
+        sites=sites,
+    )

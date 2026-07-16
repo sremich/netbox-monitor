@@ -15,6 +15,13 @@ SCOPES = [
 ]
 
 
+def run_pass(ctx, sync, leases):
+    """One full site pass mirroring DhcpSync.run() semantics for a single site."""
+    active, reserved = sync._reconcile_site(ctx.sites[0], SCOPES, leases)
+    if ctx.config.lifecycle.delete_dhcp_on_expiry:
+        sync._delete_expired(active, reserved)
+
+
 def dynamic_lease(address="10.200.10.150", host="laptop.lan"):
     return {
         "scope": "lan",
@@ -37,7 +44,7 @@ def reserved_lease(address="10.200.10.20", host="nas.lan"):
 
 def test_dynamic_lease_creates_ip(ctx):
     sync = DhcpSync(ctx)
-    sync._reconcile(SCOPES, [dynamic_lease()])
+    run_pass(ctx, sync, [dynamic_lease()])
     ips = ctx.netbox.api.ipam.ip_addresses.items
     assert len(ips) == 1
     ip = ips[0]
@@ -52,31 +59,31 @@ def test_dynamic_lease_creates_ip(ctx):
 
 def test_expired_lease_deletes_ip(ctx):
     sync = DhcpSync(ctx)
-    sync._reconcile(SCOPES, [dynamic_lease()])
+    run_pass(ctx, sync, [dynamic_lease()])
     assert len(ctx.netbox.api.ipam.ip_addresses.items) == 1
-    sync._reconcile(SCOPES, [])  # lease gone
+    run_pass(ctx, sync, [])  # lease gone
     assert ctx.netbox.api.ipam.ip_addresses.items == []
 
 
 def test_expired_lease_kept_when_delete_disabled(ctx):
     ctx.config.lifecycle.delete_dhcp_on_expiry = False
     sync = DhcpSync(ctx)
-    sync._reconcile(SCOPES, [dynamic_lease()])
-    sync._reconcile(SCOPES, [])
+    run_pass(ctx, sync, [dynamic_lease()])
+    run_pass(ctx, sync, [])
     assert len(ctx.netbox.api.ipam.ip_addresses.items) == 1
 
 
 def test_unmanaged_ip_never_deleted(ctx):
-    # a human documented this IP by hand — no managed tag
+    # a human documented this IP by hand â€” no managed tag
     ctx.netbox.api.ipam.ip_addresses.create(address="10.200.10.150/24", status="active", tags=[])
     sync = DhcpSync(ctx)
-    sync._reconcile(SCOPES, [])
+    run_pass(ctx, sync, [])
     assert len(ctx.netbox.api.ipam.ip_addresses.items) == 1
 
 
 def test_reserved_lease_creates_device(ctx):
     sync = DhcpSync(ctx)
-    sync._reconcile(SCOPES, [reserved_lease()])
+    run_pass(ctx, sync, [reserved_lease()])
     devices = ctx.netbox.api.dcim.devices.items
     assert len(devices) == 1
     device = devices[0]
@@ -91,7 +98,7 @@ def test_reserved_lease_creates_device(ctx):
     assert len(ips) == 1
     assert ips[0].assigned_object_id == interfaces[0].id
     # reserved-lease IPs are assigned to a device and must survive lease listing churn
-    sync._reconcile(SCOPES, [])
+    run_pass(ctx, sync, [])
     assert len(ctx.netbox.api.ipam.ip_addresses.items) == 1
 
 
@@ -117,7 +124,7 @@ def test_dynamic_lease_links_to_vm_by_mac(ctx):
     vm, iface = make_vm_with_mac(nb, "jellyfin", "24:A4:3C:AA:BB:CC")
 
     sync = DhcpSync(ctx)
-    sync._reconcile(SCOPES, [dynamic_lease()])  # same MAC as the VM interface
+    run_pass(ctx, sync, [dynamic_lease()])  # same MAC as the VM interface
 
     ips = nb.api.ipam.ip_addresses.items
     assert len(ips) == 1
@@ -126,7 +133,7 @@ def test_dynamic_lease_links_to_vm_by_mac(ctx):
     assert vm.primary_ip4 == ips[0].id
 
     # lease expires: the IP is deleted even though it was assigned to a VM interface
-    sync._reconcile(SCOPES, [])
+    run_pass(ctx, sync, [])
     assert nb.api.ipam.ip_addresses.items == []
 
 
@@ -134,7 +141,7 @@ def test_dynamic_lease_does_not_claim_unmanaged_vm(ctx):
     nb = ctx.netbox
     vm, _iface = make_vm_with_mac(nb, "handmade-vm", "24:A4:3C:AA:BB:CC", managed=False)
     sync = DhcpSync(ctx)
-    sync._reconcile(SCOPES, [dynamic_lease()])
+    run_pass(ctx, sync, [dynamic_lease()])
     # the IP is still linked to the interface, but a human-made VM's primary is not touched
     assert nb.api.ipam.ip_addresses.items[0].assigned_object_type == ("virtualization.vminterface")
     assert vm.primary_ip4 is None
@@ -145,14 +152,14 @@ def test_reserved_lease_for_vm_attaches_and_dedupes(ctx):
     sync = DhcpSync(ctx)
 
     # first pass: VM not in NetBox yet -> a device gets created for the reservation
-    sync._reconcile(SCOPES, [reserved_lease()])
+    run_pass(ctx, sync, [reserved_lease()])
     assert nb.api.dcim.devices.get(name="nas") is not None
 
     # proxmox sync later documents the guest with the same MAC
     vm, iface = make_vm_with_mac(nb, "nas", "24:A4:3C:11:22:33")
 
     # next pass: the duplicate device is removed, IP moves to the VM interface
-    sync._reconcile(SCOPES, [reserved_lease()])
+    run_pass(ctx, sync, [reserved_lease()])
     assert nb.api.dcim.devices.get(name="nas") is None
     ips = nb.api.ipam.ip_addresses.items
     assert len(ips) == 1
@@ -161,13 +168,13 @@ def test_reserved_lease_for_vm_attaches_and_dedupes(ctx):
     assert vm.primary_ip4 == ips[0].id
 
     # reserved IPs are never deleted, even when assigned to a VM interface
-    sync._reconcile(SCOPES, [reserved_lease()])
+    run_pass(ctx, sync, [reserved_lease()])
     assert len(nb.api.ipam.ip_addresses.items) == 1
 
 
 def test_scope_annotates_prefix(ctx):
     prefix = ctx.netbox.api.ipam.prefixes.create(prefix="10.200.10.0/24", status="active")
     sync = DhcpSync(ctx)
-    sync._reconcile(SCOPES, [])
+    run_pass(ctx, sync, [])
     assert "lan" in prefix.custom_fields["dhcp_scope"]
     assert "10.200.10.100-10.200.10.200" in prefix.custom_fields["dhcp_scope"]

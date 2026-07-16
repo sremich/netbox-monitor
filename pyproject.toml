@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "netbox-monitor"
-version = "0.1.0"
+version = "2.0.0"
 description = "Network auto-documentation service: syncs Technitium DNS/DHCP, ping discovery, Proxmox, LLDP topology, and SSL certs into NetBox"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,6 +22,11 @@ dependencies = [
     "python-dotenv>=1.0",
     "structlog>=24.1",
     "aiosqlite>=0.20",
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "itsdangerous>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +34,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
+    "httpx>=0.27",
 ]
 
 [project.scripts]

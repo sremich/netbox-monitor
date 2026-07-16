@@ -243,6 +243,7 @@ def ensure_host_device(
     name: str,
     ip: str,
     source_slug: str,
+    site_id: int | None,
     mac: str | None = None,
     vendor: str | None = None,
     dns_name: str = "",
@@ -261,13 +262,20 @@ def ensure_host_device(
             device = nb.api.dcim.devices.get(name=name)
 
     if device is None:
+        if site_id is None:
+            log.warning(
+                "cannot create device without a resolved NetBox site; skipping",
+                name=name,
+                ip=ip,
+            )
+            return None
         _, device_type = ensure_discovered_device_type(nb, vendor)
         device = nb.create(
             nb.api.dcim.devices,
             name=name,
             role=nb.refs.get("role_discovered"),
             device_type=device_type.id if device_type else None,
-            site=nb.refs.get("site"),
+            site=site_id,
             status="active",
             description=description,
             tags=nb.tag_ids(MANAGED_TAG_SLUG, source_slug),

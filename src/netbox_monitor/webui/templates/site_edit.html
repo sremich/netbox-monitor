@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}{{ 'New site' if is_new else site.name }} — netbox-monitor{% endblock %}
+{% block content %}
+<h2>{{ 'New site' if is_new else 'Edit site: ' + site.name }}</h2>
+{% if error %}<article class="warn">{{ error }}</article>{% endif %}
+
+<form method="post" action="{{ '/sites/new' if is_new else '/sites/' + site.id }}">
+  <article>
+    <header><strong>Identity</strong></header>
+    <label>Site name
+      <input type="text" name="name" value="{{ site.name }}" required>
+    </label>
+    <label>NetBox site
+      <select name="netbox_site" id="netbox-site-select"
+              data-current="{{ site.netbox_site }}">
+        {% if site.netbox_site %}
+        <option value="{{ site.netbox_site }}" selected>{{ site.netbox_site }} (current)</option>
+        {% endif %}
+        <option value="__new__">＋ create a new NetBox site…</option>
+      </select>
+    </label>
+    <label>New NetBox site name <small>(only when creating a new one)</small>
+      <input type="text" name="netbox_site_name" value="{{ site.netbox_site_name }}"
+             placeholder="e.g. Beach House">
+    </label>
+  </article>
+
+  <article>
+    <header><strong>Technitium DNS/DHCP</strong></header>
+    <label>URL <input type="text" name="tech_url"
+           value="{{ site.technitium.url if site.technitium else '' }}"
+           placeholder="http://10.0.0.2:5380 (blank = no Technitium at this site)"></label>
+    <label>API token <input type="password" name="tech_token"
+           placeholder="{{ '•••••••• (unchanged if blank)' if site.technitium and site.technitium.token else 'token' }}"></label>
+    <input type="hidden" name="site_id" value="{{ site.id }}">
+    <button type="button" class="outline small" hx-post="/test/technitium"
+            hx-include="closest article" hx-target="#tech-test" hx-swap="innerHTML">Test</button>
+    <span id="tech-test"></span>
+    <label><input type="checkbox" name="dhcp_enabled" {% if site.dhcp_enabled %}checked{% endif %}>
+      Sync DHCP leases</label>
+    <label><input type="checkbox" name="dns_enabled" {% if site.dns_enabled %}checked{% endif %}>
+      Sync DNS records</label>
+  </article>
+
+  <article>
+    <header><strong>Proxmox instances</strong></header>
+    <div id="px-rows">
+      {% for px in site.proxmox %}
+      <fieldset class="px-row grid">
+        <input type="text" name="px_host" value="{{ px.host }}" placeholder="host/IP">
+        <input type="number" name="px_port" value="{{ px.port }}" placeholder="8006">
+        <input type="text" name="px_user" value="{{ px.user }}" placeholder="user@pve">
+        <input type="text" name="px_token_name" value="{{ px.token_name }}" placeholder="token name">
+        <input type="password" name="px_token_value" placeholder="•••••••• (unchanged if blank)">
+      </fieldset>
+      {% endfor %}
+      <fieldset class="px-row grid">
+        <input type="text" name="px_host" placeholder="host/IP (blank row ignored)">
+        <input type="number" name="px_port" placeholder="8006">
+        <input type="text" name="px_user" placeholder="user@pve">
+        <input type="text" name="px_token_name" placeholder="token name">
+        <input type="password" name="px_token_value" placeholder="token secret">
+      </fieldset>
+    </div>
+    <input type="hidden" name="site_id" value="{{ site.id }}" id="px-site-id">
+    <button type="button" class="outline small" onclick="addPxRow()">＋ Add instance</button>
+    <button type="button" class="outline small" hx-post="/test/proxmox"
+            hx-include="#px-rows fieldset:first-child, #px-site-id" hx-target="#px-test"
+            hx-swap="innerHTML">Test first instance</button>
+    <span id="px-test"></span>
+    <label><input type="checkbox" name="proxmox_enabled" {% if site.proxmox_enabled %}checked{% endif %}>
+      Sync Proxmox guests</label>
+  </article>
+
+  <article>
+    <header><strong>Discovery scanning scope</strong></header>
+    <label><input type="checkbox" name="discovery_enabled"
+                  {% if site.discovery.enabled %}checked{% endif %}> Enable ping discovery</label>
+    <div class="grid">
+      <label>Include prefixes <small>(empty = all prefixes scoped to this NetBox site)</small>
+        <select name="include_prefixes" id="include-prefixes" multiple size="8">
+          {% for p in site.discovery.include_prefixes %}
+          <option value="{{ p }}" selected>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Exclude prefixes
+        <select name="exclude_prefixes" id="exclude-prefixes" multiple size="8">
+          {% for p in site.discovery.exclude_prefixes %}
+          <option value="{{ p }}" selected>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <div class="grid">
+      <label>Extra include CIDRs (comma separated)
+        <input type="text" name="include_extra" placeholder="10.50.0.0/24, 10.60.0.0/24"></label>
+      <label>Extra exclude CIDRs
+        <input type="text" name="exclude_extra" placeholder="10.50.0.128/25"></label>
+    </div>
+  </article>
+
+  <button type="submit">Save site</button>
+  <a href="/sites" role="button" class="outline">Cancel</a>
+</form>
+
+<script>
+// populate the NetBox site dropdown and prefix pickers from the live NetBox API
+async function populate() {
+  try {
+    const sites = await (await fetch('/api/netbox/sites')).json();
+    const select = document.getElementById('netbox-site-select');
+    const current = select.dataset.current;
+    if (Array.isArray(sites)) {
+      for (const s of sites) {
+        if (s.slug === current) continue;
+        const opt = new Option(`${s.name} (${s.slug})`, s.slug);
+        select.insertBefore(opt, select.lastElementChild);
+      }
+    }
+  } catch (e) { console.warn('site list unavailable', e); }
+  try {
+    const prefixes = await (await fetch('/api/netbox/prefixes')).json();
+    if (Array.isArray(prefixes)) {
+      for (const id of ['include-prefixes', 'exclude-prefixes']) {
+        const sel = document.getElementById(id);
+        const chosen = new Set([...sel.options].map(o => o.value));
+        for (const p of prefixes) {
+          if (!chosen.has(p)) sel.add(new Option(p, p));
+        }
+      }
+    }
+  } catch (e) { console.warn('prefix list unavailable', e); }
+}
+function addPxRow() {
+  const rows = document.getElementById('px-rows');
+  rows.appendChild(rows.lastElementChild.cloneNode(true));
+}
+populate();
+</script>
+{% endblock %}
