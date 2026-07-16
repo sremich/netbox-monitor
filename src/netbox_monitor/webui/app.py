@@ -4,6 +4,7 @@ run-now triggers, and connection tests. Server-rendered Jinja2 + htmx."""
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
@@ -192,6 +193,7 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
             c.lldp.max_switches = max(1, int(form.get("lldp_max_switches") or 100))
             c.lldp.max_depth = max(1, int(form.get("lldp_max_depth") or 8))
             c.lldp.credentials = _lldp_credentials_from_form(form, c.lldp.credentials)
+            c.lldp.exclude_hosts = _split_hosts(str(form.get("lldp_exclude_hosts") or ""))
             new_password = str(form.get("new_password") or "")
             if new_password:
                 c.webui.password_hash = hash_password(new_password)
@@ -413,6 +415,10 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
 
 def _csv_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _split_hosts(value: str) -> list[str]:
+    return [h for h in re.split(r"[,\s]+", value) if h.strip()]
 
 
 def _lldp_credentials_from_form(form: Any, previous: list[LldpCredential]) -> list[LldpCredential]:

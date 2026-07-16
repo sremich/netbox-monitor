@@ -89,6 +89,18 @@ def test_global_credential_profiles_tried(ctx):
     assert snmp_call[2]["snmp_community"] == "globalcomm"
 
 
+def test_known_vendor_host_not_credential_sprayed(ctx):
+    """A switch whose vendor is known (platform hint) must only be tried with that
+    one SSH driver, not every vendor's login — anti-lockout for production gear."""
+    ctx.sites[0].config.lldp = SiteLldpConfig(enabled=True, ssh_username="admin", ssh_password="pw")
+    # a unifi-platform seed with an 'auto' credential
+    make_switch(ctx.netbox, "usw", ctx.netbox.home_site_id, "unifi", "10.0.0.5")
+    calls = capture_collect(ctx)
+    ssh_calls = [c for c in calls if c[0] in {"cisco", "arista", "aruba", "mikrotik", "unifi"}]
+    # only the unifi driver is attempted, not all five SSH drivers
+    assert {c[0] for c in ssh_calls} == {"unifi"}
+
+
 def test_other_sites_switches_not_polled(ctx):
     ctx.sites[0].config.lldp = SiteLldpConfig(enabled=True, snmp_community="c")
     other = ctx.netbox.api.dcim.sites.create(name="Elsewhere", slug="elsewhere")

@@ -80,6 +80,13 @@
       </tbody>
     </table>
     <p><small>Add a row by filling the blank one; save again for another blank row.</small></p>
+    <label>Never authenticate these hosts <small>(document-only — production routers/firewalls)</small>
+      <input type="text" name="lldp_exclude_hosts"
+             value="{{ config.lldp.exclude_hosts | join(', ') }}"
+             placeholder="10.200.11.1, 10.0.0.1">
+    </label>
+    <p><small>These are still drawn into the topology from neighbor data, but the tool
+    never opens an SSH/SNMP session to them.</small></p>
   </article>
 
   <article>

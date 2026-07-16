@@ -146,6 +146,7 @@ class LldpSync:
         nb = self.ctx.netbox
         tag_slug = slugify(cfg.source_tag)
         profiles = self._credential_profiles(site)
+        exclude = {h.strip() for h in cfg.exclude_hosts if h.strip()}
         stats = SiteStats()
 
         seeds = await asyncio.to_thread(
@@ -178,6 +179,14 @@ class LldpSync:
             visited_ip.add(target.host)
             if target.chassis_mac:
                 visited_mac.add(target.chassis_mac)
+
+            if target.host in exclude:
+                # document-only host (e.g. production router): never authenticate it.
+                # It is already created + cabled by the neighbor that reported it.
+                log.info(
+                    "lldp: host excluded from authentication (document-only)", host=target.host
+                )
+                continue
 
             poll = await self._poll_target(target, site, profiles)
             if poll is None:
@@ -240,8 +249,18 @@ class LldpSync:
         """Try credentials/drivers until neighbors come back. Returns
         (neighbors, cred, driver) or None if nothing worked."""
         attempts = await self._build_attempts(target, site, profiles)
+        # hard safety cap: never make more than this many auth attempts against one
+        # host (protects production gear from credential-spray lockouts)
+        max_attempts = self.ctx.config.lldp.max_auth_attempts
         ssh_unreachable = False  # a pre-auth reset means every SSH driver will fail alike
-        for driver, cred in attempts:
+        for attempt_num, (driver, cred) in enumerate(attempts):
+            if attempt_num >= max_attempts:
+                log.info(
+                    "lldp: auth attempt cap reached; giving up on host",
+                    host=target.host,
+                    cap=max_attempts,
+                )
+                break
             if ssh_unreachable and driver in registry.SSH_DRIVERS:
                 continue
             try:
@@ -296,15 +315,17 @@ class LldpSync:
         def drivers_for(cred: LldpCredential | None) -> list[str]:
             if cred and cred.driver != "auto":
                 return [cred.driver]
+            # when the switch's vendor is known (platform hint or LLDP sysDescr),
+            # try ONLY that SSH driver — never spray every vendor's login at one host
             hint = target.hint_driver
-            order = ([hint] if hint else []) + registry.AUTO_ORDER
-            # only offer SSH drivers when we have ssh creds, snmp when we have a community
+            ssh_order = [hint] if hint else list(registry.AUTO_ORDER)
             out = []
-            for d in order:
+            for d in ssh_order:
                 if d in registry.SSH_DRIVERS and cred and cred.username:
                     out.append(d)
-                elif d in registry.SNMP_DRIVERS and cred and cred.snmp_community:
-                    out.append(d)
+            # SNMP is a separate transport; offer it whenever a community is present
+            if cred and cred.snmp_community:
+                out.append("snmp")
             return out
 
         if cached:

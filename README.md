@@ -108,6 +108,16 @@ credentials take precedence.
 > `access-class`). Permit the host running netbox-monitor, or the crawl will log those
 > switches as unreachable (it stops after one connection-reset rather than retrying).
 
+**Protecting production gear.** Two safeguards keep the crawl from ever hammering a
+router/firewall:
+
+- **Document-only exclusion list** (Settings → LLDP topology crawl → *Never authenticate
+  these hosts*): listed IPs are drawn into the topology from neighbor data but the tool
+  **never opens an SSH/SNMP session to them**. Use it for production routers.
+- **No credential spraying**: when a switch's vendor is known (platform or LLDP
+  description) only that one driver's login is tried, and there's a hard per-host cap
+  (`max_auth_attempts`, default 4) so a device is never hit with a barrage of logins.
+
 ## NetBox objects it maintains
 
 - Tags: `managed:netbox-monitor`, `src:*`, `stale`, `cert-expiring`, `cert-expired`

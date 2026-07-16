@@ -159,8 +159,13 @@ class LldpConfig(ModuleConfig):
     crawl_enabled: bool = True
     max_switches: int = 100  # crawl safety cap
     max_depth: int = 8
+    max_auth_attempts: int = 4  # cap credential tries per host (anti-lockout)
     # global credential profiles tried (after site creds) against discovered switches
     credentials: list[LldpCredential] = Field(default_factory=list)
+    # hosts the crawl must NEVER open a session to (SSH/SNMP). They are still
+    # documented as devices and cabled from neighbor data — but never authenticated.
+    # Use for production routers/firewalls where any connection is unwanted.
+    exclude_hosts: list[str] = Field(default_factory=list)
 
 
 class CertsConfig(ModuleConfig):

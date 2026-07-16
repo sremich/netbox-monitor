@@ -127,6 +127,26 @@ def test_crawl_dedup_on_loop(ctx):
     assert hosts.count("10.0.0.2") == 1
 
 
+def test_excluded_host_never_authenticated(ctx):
+    nb = ctx.netbox
+    seed_switch(nb, "sw-a", "10.0.0.1")
+    # the seed sees a production router (10.0.0.254) that is a real switch/gateway
+    topo = {
+        "10.0.0.1": [
+            nbr("e1", "10.0.0.254", "aa:bb:cc:00:02:54", "Ubiquiti UniFi UCG", sysname="router")
+        ],
+        "10.0.0.254": [nbr("x", "10.0.0.99", "aa:bb:cc:00:00:99", "Cisco IOS")],  # would crawl on
+    }
+    ctx.config.lldp.exclude_hosts = ["10.0.0.254"]
+    calls = run_lldp(ctx, topo)
+    polled_hosts = [h for _d, h in calls]
+    # the router is documented but NEVER contacted
+    assert "10.0.0.254" not in polled_hosts
+    assert nb.api.dcim.devices.get(name="router") is not None  # still documented
+    # and nothing behind it was reached (no session to the router = no onward crawl)
+    assert "10.0.0.99" not in polled_hosts
+
+
 def test_dead_switch_does_not_abort(ctx):
     nb = ctx.netbox
     seed_switch(nb, "sw-a", "10.0.0.1")
