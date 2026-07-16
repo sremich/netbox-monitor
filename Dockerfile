@@ -10,9 +10,12 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir .
 
-# raw ICMP sockets without running as root
+# raw ICMP sockets without running as root; data dir must be writable by the
+# runtime user (named volumes inherit ownership from the image directory)
 RUN useradd -r -m monitor \
-    && setcap cap_net_raw+ep "$(readlink -f "$(which python3)")" || true
+    && mkdir -p /app/data \
+    && chown -R monitor:monitor /app/data \
+    && { setcap cap_net_raw+ep "$(readlink -f "$(which python3)")" || true; }
 
 USER monitor
 VOLUME /app/data
