@@ -143,9 +143,7 @@ class DiscoverySync:
                     site=site.config.id,
                 )
                 with nb.lock:
-                    return [
-                        str(p.prefix) for p in nb.api.ipam.prefixes.filter(status="active")
-                    ]
+                    return [str(p.prefix) for p in nb.api.ipam.prefixes.filter(status="active")]
             return scoped
 
         return await asyncio.to_thread(fetch)

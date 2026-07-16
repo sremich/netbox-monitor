@@ -14,6 +14,10 @@ def setup_logging(level: str = "INFO") -> None:
         stream=sys.stdout,
         level=getattr(logging, level.upper(), logging.INFO),
     )
+    # httpx logs full request URLs at INFO — those carry ?token=... query params
+    # for the Technitium API. Silence it so secrets never reach the logs.
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
