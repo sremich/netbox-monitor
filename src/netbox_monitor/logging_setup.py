@@ -20,6 +20,7 @@ def setup_logging(level: str = "INFO") -> None:
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
             structlog.dev.ConsoleRenderer()
             if sys.stdout.isatty()
             else structlog.processors.JSONRenderer(),

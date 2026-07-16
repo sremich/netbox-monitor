@@ -255,9 +255,18 @@ class ProxmoxSync:
                 assigned_object_type="virtualization.vminterface" if first_iface else None,
                 assigned_object_id=first_iface.id if first_iface else None,
             )
-            if ip_obj is not None and not primary_set:
+            if (
+                ip_obj is not None
+                and not primary_set
+                and first_iface is not None
+                and getattr(ip_obj, "assigned_object_id", None) == first_iface.id
+            ):
                 nb.update(vm, {"primary_ip4": ip_obj.id}, reason="set VM primary IP")
                 primary_set = True
+            elif ip_obj is not None and not primary_set:
+                # IP exists but belongs elsewhere (e.g. its DHCP lease record);
+                # don't hijack it as this VM's primary
+                log.info("VM IP not assigned to its interface; primary not set", vm=name, ip=ip)
 
     def _mark_vanished(self, nb: NetBoxClient, cluster: Any, seen: set[str]) -> None:
         existing = nb.filter_tagged(
