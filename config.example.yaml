@@ -17,10 +17,10 @@ sites:
     name: Home
     netbox_site: home            # NetBox site slug (created if missing)
     technitium:
-      url: http://10.200.11.2:5380
+      url: http://10.0.0.2:5380
       token: ${TECHNITIUM_TOKEN}
     proxmox:
-      - host: 10.200.11.91
+      - host: 10.0.0.10
         user: monitor@pve
         token_name: netbox-monitor
         token_value: ${PVE_TOKEN}

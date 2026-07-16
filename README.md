@@ -42,7 +42,7 @@ automatically** into a single site.
 
 - **NetBox**: create an API token (Admin → API Tokens) with write access.
 - **Technitium**: create a permanent API token:
-  `curl "http://10.200.11.2:5380/api/user/createToken?user=admin&pass=...&tokenName=netbox-monitor"`
+  `curl "http://10.0.0.2:5380/api/user/createToken?user=admin&pass=...&tokenName=netbox-monitor"`
 - **Proxmox**: create an API token (Datacenter → Permissions → API Tokens), e.g. user
   `monitor@pve`, token `netbox-monitor`, with the `PVEAuditor` role on `/`.
 
