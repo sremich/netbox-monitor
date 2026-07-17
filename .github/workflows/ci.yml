@@ -21,6 +21,18 @@ jobs:
           cache: pip
       - name: Install
         run: pip install -e ".[dev]"
+      # Runs in `test` so the `docker` job (needs: test) can never publish an image
+      # whose tag disagrees with the code inside it.
+      - name: Check git tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          pkg=$(python -c "import netbox_monitor; print(netbox_monitor.__version__)")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::git tag v$tag does not match __version__ $pkg — bump src/netbox_monitor/__init__.py"
+            exit 1
+          fi
+          echo "tag v$tag matches __version__ $pkg"
       - name: Lint
         run: |
           ruff check .

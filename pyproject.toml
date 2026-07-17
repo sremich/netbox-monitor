@@ -4,7 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "netbox-monitor"
-version = "2.2.1"
+# single-sourced from src/netbox_monitor/__init__.py — see [tool.hatch.version].
+# CI refuses to publish when a v* tag disagrees with it.
+dynamic = ["version"]
 description = "Network auto-documentation service: syncs Technitium DNS/DHCP, ping discovery, Proxmox, LLDP topology, and SSL certs into NetBox"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -39,6 +41,14 @@ dev = [
 
 [project.scripts]
 netbox-monitor = "netbox_monitor.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/sremich/netbox-monitor"
+Repository = "https://github.com/sremich/netbox-monitor"
+Issues = "https://github.com/sremich/netbox-monitor/issues"
+
+[tool.hatch.version]
+path = "src/netbox_monitor/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/netbox_monitor"]
