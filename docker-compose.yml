@@ -24,6 +24,15 @@ services:
     env_file:
       - path: .env
         required: false
+    # environment:
+    #   - WEBUI_PASSWORD=change-me
+    #   # First-boot restore from a config export (Backup page -> Export). Only used
+    #   # when data/settings.json doesn't exist yet, so it never clobbers a live
+    #   # config. A bad passphrase logs an error and starts unconfigured rather than
+    #   # crash-looping — set NBM_RESTORE_STRICT=1 to fail hard instead. Note the
+    #   # export carries no password, so WEBUI_PASSWORD / the setup page still apply.
+    #   - NBM_RESTORE_FILE=/app/restore.json
+    #   - NBM_RESTORE_PASSPHRASE_FILE=/run/secrets/nbm_restore_pw  # keeps it out of `docker inspect`
     volumes:
       - netbox-monitor-data:/app/data
       # optional seed config (otherwise configure everything in the web UI):

@@ -40,6 +40,61 @@ def _restrict(path: Path) -> None:
         os.chmod(path, 0o600)
 
 
+def _restore_passphrase() -> str | None:
+    """The restore passphrase, preferring a file so it stays out of `docker inspect`."""
+    passphrase_file = os.environ.get("NBM_RESTORE_PASSPHRASE_FILE")
+    if passphrase_file:
+        with contextlib.suppress(OSError):
+            return Path(passphrase_file).read_text(encoding="utf-8").strip()
+        log.error("NBM_RESTORE_PASSPHRASE_FILE is unreadable", path=passphrase_file)
+        return None
+    return os.environ.get("NBM_RESTORE_PASSPHRASE") or None
+
+
+def _restore_from_env() -> AppConfig | None:
+    """First-boot restore from a mounted config export (``NBM_RESTORE_FILE``).
+
+    Only reached when there is no settings.json, so it can never override a real
+    config. Note it does *not* restore a password — ``webui`` is never exported — so
+    the usual WEBUI_PASSWORD/setup-page flow still gates the UI.
+    """
+    source = os.environ.get("NBM_RESTORE_FILE")
+    if not source:
+        return None
+    strict = os.environ.get("NBM_RESTORE_STRICT") == "1"
+    try:
+        from netbox_monitor.config_transfer import import_config
+
+        result = import_config(
+            Path(source).read_bytes(), passphrase=_restore_passphrase(), current=AppConfig()
+        )
+    except Exception as exc:
+        # Deliberately broad: a wrong passphrase or a bad mount must not crash-loop
+        # the container. Come up unconfigured and say exactly how to retry.
+        log.error(
+            "auto-restore failed; starting unconfigured",
+            source=source,
+            error=str(exc),
+            remedy="fix the passphrase/file, delete data/settings.json, and restart",
+        )
+        if strict:
+            raise
+        return None
+    log.info(
+        "auto-restored configuration",
+        source=source,
+        from_app_version=result.source_app_version,
+        sites=[s.id for s in result.config.sites],
+        unresolved_secrets=list(result.unresolved_secrets),
+    )
+    if result.unresolved_secrets:
+        log.warning(
+            "restored config is missing secrets (the export was redacted)",
+            unresolved=list(result.unresolved_secrets),
+        )
+    return result.config
+
+
 class SettingsStore:
     def __init__(self, path: Path, config: AppConfig):
         self.path = path
@@ -68,6 +123,9 @@ class SettingsStore:
                     "migrated settings to current schema", was=found, now=CONFIG_SCHEMA_VERSION
                 )
                 store._persist()
+        elif (restored := _restore_from_env()) is not None:
+            store = cls(path, restored)
+            store._persist()
         elif config_yaml and Path(config_yaml).exists():
             config = load_config(config_yaml)
             log.info(
