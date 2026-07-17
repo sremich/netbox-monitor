@@ -14,7 +14,7 @@ from icmplib import async_multiping
 
 from netbox_monitor.clients.netbox import MANAGED_TAG_SLUG, STALE_TAG_SLUG
 from netbox_monitor.context import Context
-from netbox_monitor.sync.common import now_iso
+from netbox_monitor.sync.common import ip_in_networks, now_iso, parse_ipv4_networks
 
 log = structlog.get_logger(__name__)
 
@@ -35,12 +35,28 @@ class AvailabilitySync:
             return
         cfg = self.ctx.config.availability
 
+        # An excluded prefix means "don't touch this network" — discovery already
+        # skips it, and it must not be polled either. This module is global (it
+        # doesn't track each device's site), so the key is the union of every
+        # configured site's exclude list; for a single-site setup that's exact.
+        excluded = parse_ipv4_networks(
+            prefix for site in self.ctx.sites for prefix in site.config.discovery.exclude_prefixes
+        )
+
         ip_to_device: dict[str, Any] = {}
+        skipped = 0
         for device in devices:
             primary = getattr(device, "primary_ip4", None) or getattr(device, "primary_ip", None)
-            if primary:
-                ip_to_device[str(primary.address).split("/")[0]] = device
+            if not primary:
+                continue
+            ip = str(primary.address).split("/")[0]
+            if ip_in_networks(ip, excluded):
+                skipped += 1
+                continue
+            ip_to_device[ip] = device
 
+        if skipped:
+            log.info("availability: skipped hosts in excluded prefixes", count=skipped)
         if not ip_to_device:
             return
         results = await async_multiping(

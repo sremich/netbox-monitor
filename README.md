@@ -9,7 +9,7 @@ APIs:
 | **dhcp** | Mirrors Technitium DHCP leases: dynamic leases become IPAddress records (deleted when the lease expires); reservations become full Devices | 60s |
 | **dns** | Collates Technitium DNS zones with NetBox IPs: sets `dns_name`, reports drift | 5 min |
 | **discovery** | Ping-sweeps every active NetBox prefix *outside* the DHCP scopes; responders become Devices with MAC, OUI manufacturer, reverse-DNS name | 15 min |
-| **availability** | Pings all discovered/reserved hosts; unreachable > 10 min → tagged `stale` + status offline, auto-recovers when back | 60s |
+| **availability** | Pings discovered/reserved hosts (skipping any site's `exclude_prefixes`); unreachable > 10 min → tagged `stale` + status offline, auto-recovers when back | 60s |
 | **proxmox** | Syncs PVE nodes, QEMU VMs and LXC containers (resources, interfaces, IPs via guest agent) into NetBox virtualization | 5 min |
 | **lldp** | Crawls the switch fabric from `lldp-source` seeds (Cisco/Arista/Aruba/MikroTik/UniFi over SSH, or SNMP), auto-creates discovered switches, and documents links as cables | 30 min |
 | **certs** | Probes TLS ports on every host with a primary IP; records expiry/issuer/CN, tags `cert-expiring` / `cert-expired` | daily |

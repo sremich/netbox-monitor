@@ -6,6 +6,7 @@ All functions here are synchronous (pynetbox) — call them via ``asyncio.to_thr
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -17,6 +18,40 @@ from netbox_monitor.clients.netbox import MANAGED_TAG_SLUG, NetBoxClient, slugif
 log = structlog.get_logger(__name__)
 
 UNKNOWN_VENDOR = "Unknown"
+
+
+def parse_ipv4_networks(prefixes: Iterable[str]) -> list[ipaddress.IPv4Network]:
+    """Parse prefix strings into IPv4 networks, skipping any that aren't v4 or valid.
+
+    Mirrors how discovery reads ``exclude_prefixes`` (discovery.py:191-198) so the
+    same exclusion means the same thing wherever it's applied.
+    """
+    networks: list[ipaddress.IPv4Network] = []
+    for prefix in prefixes:
+        try:
+            net = ipaddress.ip_network(prefix, strict=False)
+        except ValueError:
+            continue
+        if net.version == 4:
+            networks.append(net)
+    return networks
+
+
+def ip_in_networks(ip: str, networks: Sequence[ipaddress.IPv4Network]) -> bool:
+    """True if ``ip`` (a v4 host address) falls inside any of ``networks``.
+
+    Non-IPv4 or unparseable addresses are treated as not-excluded rather than
+    raising, so a mixed-version address list can't break a sweep.
+    """
+    if not networks:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if addr.version != 4:
+        return False
+    return any(addr in net for net in networks)
 
 
 def now_iso() -> str:
