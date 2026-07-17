@@ -160,7 +160,7 @@ def test_snmp_sg300_encoding(monkeypatch):
         MAN: [(f"{MAN}.3.0.58.51.1.4.10.200.1.1", 2)],
     }
 
-    async def fake_walk(host, community, oid):
+    async def fake_walk(engine, host, community, oid):
         return walks.get(oid, [])
 
     monkeypatch.setattr(snmp_driver, "_walk", fake_walk)

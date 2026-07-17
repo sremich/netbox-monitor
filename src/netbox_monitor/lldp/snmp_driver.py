@@ -90,8 +90,7 @@ def _decode(value: object, as_mac_if_binary: bool = False) -> str:
     return str(value)
 
 
-async def _walk(host: str, community: str, oid: str) -> list[tuple[str, object]]:
-    engine = SnmpEngine()
+async def _walk(engine, host: str, community: str, oid: str) -> list[tuple[str, object]]:
     target = await UdpTransportTarget.create((host, 161), timeout=3, retries=1)
     results: list[tuple[str, object]] = []
     iterator = bulk_walk_cmd(
@@ -112,10 +111,38 @@ async def _walk(host: str, community: str, oid: str) -> list[tuple[str, object]]
     return results
 
 
+def _close_engine(engine) -> None:
+    # release the UDP transport dispatcher rather than leaking it to GC
+    for closer in ("close_dispatcher", "closeDispatcher"):
+        fn = getattr(engine, closer, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+            return
+    dispatcher = getattr(engine, "transport_dispatcher", None) or getattr(
+        engine, "transportDispatcher", None
+    )
+    if dispatcher is not None:
+        try:
+            dispatcher.close_dispatcher()
+        except Exception:
+            pass
+
+
 async def collect(host: str, community: str) -> list[LldpNeighbor]:
+    engine = SnmpEngine()
+    try:
+        return await _collect(engine, host, community)
+    finally:
+        _close_engine(engine)
+
+
+async def _collect(engine, host: str, community: str) -> list[LldpNeighbor]:
     # local port number -> port id (usually the ifName)
     local_ports: dict[int, str] = {}
-    for oid, value in await _walk(host, community, OID_LOC_PORT_ID):
+    for oid, value in await _walk(engine, host, community, OID_LOC_PORT_ID):
         port_num = int(oid.rsplit(".", 1)[1])
         name = _decode(value)
         # some switches report a binary/MAC port id that decodes to junk; fall back
@@ -126,7 +153,7 @@ async def collect(host: str, community: str) -> list[LldpNeighbor]:
     # remote table rows grouped by (localPortNum, index)
     rows: dict[tuple[int, int], dict[int, object]] = {}
     base_len = len(OID_REM_BASE.split("."))
-    for oid, value in await _walk(host, community, OID_REM_BASE):
+    for oid, value in await _walk(engine, host, community, OID_REM_BASE):
         # OID layout: <base>.<column>.<timeMark>.<localPortNum>.<index>
         parts = oid.split(".")
         column = int(parts[base_len])
@@ -138,7 +165,7 @@ async def collect(host: str, community: str) -> list[LldpNeighbor]:
     man_addrs: dict[tuple[int, int], str] = {}
     man_base_len = len(OID_REM_MAN_ADDR.split("."))
     try:
-        for oid, _value in await _walk(host, community, OID_REM_MAN_ADDR):
+        for oid, _value in await _walk(engine, host, community, OID_REM_MAN_ADDR):
             # index after base: <column>.<timeMark>.<localPortNum>.<remIndex>.<addr...>
             idx_parts = oid.split(".")[man_base_len:]
             if len(idx_parts) >= 4:

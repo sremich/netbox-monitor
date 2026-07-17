@@ -58,7 +58,9 @@ class ProxmoxSync:
         """NetBox >= 4.1 stores VM disk in MB, older versions in GB."""
         if self._disk_in_mb is None:
             try:
-                major, minor = (int(x) for x in str(nb.api.version).split(".")[:2])
+                with nb.lock:  # nb.api.version issues an HTTP call on the shared session
+                    raw = str(nb.api.version)
+                major, minor = (int(x) for x in raw.split(".")[:2])
                 self._disk_in_mb = (major, minor) >= (4, 1)
             except Exception:
                 self._disk_in_mb = True
@@ -151,11 +153,14 @@ class ProxmoxSync:
         )
         if device is None:
             return None
+        # only enrich nodes we own — never touch a human-created device of the same name
+        if not nb.is_managed(device, SRC):
+            return device
         updates = {}
         if getattr(device, "cluster", None) is None:
             updates["cluster"] = cluster.id
         current_status = getattr(device.status, "value", str(device.status))
-        if nb.is_managed(device, SRC) and current_status != status:
+        if current_status != status:
             updates["status"] = status
             updates["custom_fields"] = {
                 **dict(device.custom_fields or {}),
@@ -226,6 +231,10 @@ class ProxmoxSync:
             if nb.is_managed(vm, SRC) and STALE_TAG_SLUG in nb.obj_tag_slugs(vm):
                 nb.remove_tags(vm, STALE_TAG_SLUG)
 
+        # a human-created VM sharing this name: never attach interfaces/IPs to it
+        if not nb.is_managed(vm, SRC):
+            return
+
         # interfaces + IPs
         try:
             config = client.guest_config(node_name, kind, vmid)
@@ -293,7 +302,7 @@ class ProxmoxSync:
             nb.api.virtualization.virtual_machines, SRC, cluster_id=cluster.id
         )
         for vm in existing:
-            if vm.name in seen:
+            if vm.name in seen or not nb.is_managed(vm, SRC):
                 continue
             if STALE_TAG_SLUG in nb.obj_tag_slugs(vm):
                 continue

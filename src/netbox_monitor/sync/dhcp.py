@@ -60,7 +60,9 @@ class DhcpSync:
 
         all_active: set[str] = set()
         all_reserved: set[str] = set()
-        any_failed = False
+        # networks we actually fetched this run — deletions are scoped to these, so a
+        # site that is removed/disabled/errored never has its IPs treated as expired
+        fetched_networks: list[ipaddress.IPv4Network] = []
         for site in sites:
             started = time.monotonic()
             try:
@@ -71,6 +73,10 @@ class DhcpSync:
                 )
                 all_active |= active
                 all_reserved |= reserved
+                for scope in scopes:
+                    network = scope_network(scope)
+                    if network is not None:
+                        fetched_networks.append(network)
                 await self.ctx.status.record(
                     self.name,
                     site.config.id,
@@ -79,16 +85,16 @@ class DhcpSync:
                     time.monotonic() - started,
                 )
             except Exception as exc:
-                any_failed = True
                 log.exception("dhcp sync failed for site", site=site.config.id)
                 await self.ctx.status.record(
                     self.name, site.config.id, False, str(exc), time.monotonic() - started
                 )
 
-        # never run the delete pass on partial data — a failed site's leases would
-        # all look expired
-        if self.ctx.config.lifecycle.delete_dhcp_on_expiry and not any_failed:
-            await asyncio.to_thread(self._delete_expired, all_active, all_reserved)
+        # delete only within scopes we successfully fetched this run
+        if self.ctx.config.lifecycle.delete_dhcp_on_expiry and fetched_networks:
+            await asyncio.to_thread(
+                self._delete_expired, all_active, all_reserved, fetched_networks
+            )
 
     # ------------------------------------------------------------------ sync
 
@@ -234,8 +240,17 @@ class DhcpSync:
             )
             nb.set_custom_fields(prefix, dhcp_scope=label)
 
-    def _delete_expired(self, active: set[str], reserved: set[str]) -> None:
+    def _delete_expired(
+        self,
+        active: set[str],
+        reserved: set[str],
+        fetched_networks: list[ipaddress.IPv4Network],
+    ) -> None:
         """Delete NetBox IPs tagged src:dhcp whose dynamic lease no longer exists.
+
+        Only IPs inside a scope we actually fetched this run are eligible — an IP
+        belonging to a site that was removed/disabled/errored is left alone rather
+        than treated as expired.
 
         Reserved-lease IPs are never deleted (their Devices go stale instead), and
         neither are IPs assigned to physical (dcim) interfaces. Dynamic IPs linked
@@ -250,5 +265,11 @@ class DhcpSync:
                 continue
             if getattr(obj, "assigned_object_type", None) == "dcim.interface":
                 continue  # a device's address (reserved lease); availability handles it
+            try:
+                addr = ipaddress.ip_address(host)
+            except ValueError:
+                continue
+            if not any(addr in net for net in fetched_networks):
+                continue  # belongs to a scope/site we didn't poll this run — don't touch
             log.info("dhcp lease gone; deleting IP", address=str(obj.address))
             nb.delete(obj, SRC)

@@ -17,9 +17,12 @@ SCOPES = [
 
 def run_pass(ctx, sync, leases):
     """One full site pass mirroring DhcpSync.run() semantics for a single site."""
+    from netbox_monitor.sync.dhcp import scope_network
+
     active, reserved = sync._reconcile_site(ctx.sites[0], SCOPES, leases)
+    networks = [n for n in (scope_network(s) for s in SCOPES) if n]
     if ctx.config.lifecycle.delete_dhcp_on_expiry:
-        sync._delete_expired(active, reserved)
+        sync._delete_expired(active, reserved, networks)
 
 
 def dynamic_lease(address="10.200.10.150", host="laptop.lan"):

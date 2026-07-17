@@ -174,13 +174,23 @@ class DiscoverySync:
                 )
 
         prefixes = await self._site_prefixes(site)
-        exclude = [ipaddress.ip_network(p) for p in site.config.discovery.exclude_prefixes]
+        # exclude entries may be whole prefixes OR sub-ranges of a scanned prefix;
+        # keep only IPv4 excludes so a mixed-version compare can't raise
+        exclude = [
+            net
+            for net in (
+                ipaddress.ip_network(p, strict=False)
+                for p in site.config.discovery.exclude_prefixes
+            )
+            if net.version == 4
+        ]
 
         targets: list[str] = []
         for prefix_str in prefixes:
             network = ipaddress.ip_network(prefix_str)
             if network.version != 4:
                 continue
+            # skip the whole prefix only if it is entirely inside an exclude entry
             if any(network.subnet_of(e) for e in exclude):
                 continue
             count = 0
@@ -190,6 +200,9 @@ class DiscoverySync:
                     break
                 as_int = int(host)
                 if any(lo <= as_int <= hi for lo, hi in dhcp_ranges):
+                    continue
+                # also drop individual hosts that fall inside an exclude sub-range
+                if any(host in e for e in exclude):
                     continue
                 targets.append(str(host))
                 count += 1

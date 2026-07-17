@@ -155,6 +155,9 @@ class Engine:
                 log.warning("no sync modules enabled")
                 await _wait_any(stop, reload_evt)
             watcher.cancel()
+            # drop the now-orphaned trigger events so a stale run_now() during the
+            # rebuild reports "not scheduled" instead of falsely succeeding
+            self.triggers = {}
             await ctx.close()
             if reload_evt.is_set() and not stop.is_set():
                 log.info("settings changed; rebuilding sync engine")

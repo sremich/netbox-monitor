@@ -192,7 +192,9 @@ def ensure_discovered_device_type(nb: NetBoxClient, vendor: str | None) -> tuple
 
 def _netbox_version(nb: NetBoxClient) -> tuple[int, int]:
     try:
-        major, minor = (int(x) for x in str(nb.api.version).split(".")[:2])
+        with nb.lock:  # nb.api.version issues an HTTP call on the shared session
+            raw = str(nb.api.version)
+        major, minor = (int(x) for x in raw.split(".")[:2])
         return (major, minor)
     except Exception:
         return (4, 2)

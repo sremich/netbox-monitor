@@ -1,11 +1,11 @@
-"""Web UI: auth flow, settings edit (intervals), site CRUD."""
+"""Web UI: auth flow, settings edit (intervals), site CRUD, security guards."""
 
 import pytest
 from fastapi.testclient import TestClient
 
 from netbox_monitor.settings_store import SettingsStore
-from netbox_monitor.webui.app import create_app
-from netbox_monitor.webui.auth import hash_password
+from netbox_monitor.webui.app import _same_origin, create_app
+from netbox_monitor.webui.auth import hash_password, verify_password
 
 
 class FakeStatus:
@@ -48,6 +48,58 @@ def test_login_and_dashboard(client):
     response = client.get("/")
     assert response.status_code == 200
     assert "Dashboard" in response.text
+
+
+def _settings_form():
+    form = {"log_level": "INFO", "stale_after": "600"}
+    for m in ("dhcp", "dns", "discovery", "availability", "proxmox", "lldp", "certs"):
+        form[f"interval_{m}"] = "300"
+    return form
+
+
+def test_password_change_requires_current_password(client, store):
+    login(client)
+    old_hash = store.get().webui.password_hash
+    form = _settings_form() | {"new_password": "brandnewpass", "current_password": "wrong"}
+    response = client.post("/settings", data=form)
+    assert response.status_code == 200
+    assert "Current password is incorrect" in response.text
+    assert store.get().webui.password_hash == old_hash  # unchanged
+
+
+def test_password_change_rotates_session(client, store):
+    login(client)
+    old_secret = store.get().webui.session_secret
+    form = _settings_form() | {"new_password": "brandnewpass", "current_password": "hunter22"}
+    response = client.post("/settings", data=form)
+    assert response.status_code == 200
+    cfg = store.get()
+    assert verify_password("brandnewpass", cfg.webui.password_hash)
+    assert cfg.webui.session_secret != old_secret  # old cookies invalidated
+
+
+def test_short_new_password_rejected(client, store):
+    login(client)
+    form = _settings_form() | {"new_password": "short", "current_password": "hunter22"}
+    response = client.post("/settings", data=form)
+    assert "at least 8 characters" in response.text
+    assert verify_password("hunter22", store.get().webui.password_hash)  # unchanged
+
+
+def test_cross_origin_post_blocked(client):
+    login(client)
+    # a POST whose Origin isn't our host is rejected (CSRF defense)
+    response = client.post(
+        "/run/dhcp", headers={"origin": "http://evil.example.com", "host": "localhost"}
+    )
+    assert response.status_code == 403
+
+
+def test_same_origin_helper():
+    assert _same_origin("https://nb.test:8000", "https://nb.test:8000/api") is True
+    assert _same_origin("https://nb.test", "https://nb.test:443") is False  # explicit vs implicit
+    assert _same_origin("https://nb.test", "https://evil.test") is False
+    assert _same_origin("", "https://nb.test") is False
 
 
 def test_first_run_setup(tmp_path):

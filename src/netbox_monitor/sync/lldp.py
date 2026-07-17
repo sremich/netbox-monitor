@@ -83,14 +83,9 @@ class LldpSync:
 
     def __init__(self, ctx: Context):
         self.ctx = ctx
+        # the netbox-secrets HTTP client is created per-run and closed at the end,
+        # so it never outlives a run (no leak across settings reloads)
         self._secrets: SecretsClient | None = None
-        if ctx.config.lldp.secrets_private_key:
-            self._secrets = SecretsClient(
-                ctx.config.netbox.url,
-                ctx.config.netbox.token,
-                ctx.config.lldp.secrets_private_key,
-                verify_ssl=ctx.config.netbox.verify_ssl,
-            )
 
     def _enabled_sites(self) -> list[ResolvedSite]:
         enabled = [s for s in self.ctx.sites if s.config.lldp.enabled]
@@ -103,24 +98,36 @@ class LldpSync:
         if not sites:
             log.info("no sites with LLDP enabled")
             return
-        for site in sites:
-            started = time.monotonic()
-            try:
-                stats = await self._crawl_site(site)
-                ok = stats.failed == 0
-                message = f"{stats.polled} polled, {stats.created} switches created" + (
-                    f", {stats.failed} unreachable" if stats.failed else ""
-                )
-                if stats.failures:
-                    message += " — " + "; ".join(stats.failures[:3])
-                await self.ctx.status.record(
-                    self.name, site.config.id, ok, message, time.monotonic() - started
-                )
-            except Exception as exc:
-                log.exception("lldp sync failed for site", site=site.config.id)
-                await self.ctx.status.record(
-                    self.name, site.config.id, False, str(exc), time.monotonic() - started
-                )
+        if self.ctx.config.lldp.secrets_private_key:
+            self._secrets = SecretsClient(
+                self.ctx.config.netbox.url,
+                self.ctx.config.netbox.token,
+                self.ctx.config.lldp.secrets_private_key,
+                verify_ssl=self.ctx.config.netbox.verify_ssl,
+            )
+        try:
+            for site in sites:
+                started = time.monotonic()
+                try:
+                    stats = await self._crawl_site(site)
+                    ok = stats.failed == 0
+                    message = f"{stats.polled} polled, {stats.created} switches created" + (
+                        f", {stats.failed} unreachable" if stats.failed else ""
+                    )
+                    if stats.failures:
+                        message += " — " + "; ".join(stats.failures[:3])
+                    await self.ctx.status.record(
+                        self.name, site.config.id, ok, message, time.monotonic() - started
+                    )
+                except Exception as exc:
+                    log.exception("lldp sync failed for site", site=site.config.id)
+                    await self.ctx.status.record(
+                        self.name, site.config.id, False, str(exc), time.monotonic() - started
+                    )
+        finally:
+            if self._secrets is not None:
+                await self._secrets.close()
+                self._secrets = None
 
     # ------------------------------------------------------------------ crawl
 

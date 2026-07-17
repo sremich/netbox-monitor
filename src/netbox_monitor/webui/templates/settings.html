@@ -115,9 +115,14 @@
 
   <article>
     <header><strong>Web UI</strong></header>
-    <label>Change password (blank = keep)
-      <input type="password" name="new_password" minlength="8" placeholder="new password">
+    <label>Current password <small>(required only to change the password)</small>
+      <input type="password" name="current_password" autocomplete="current-password">
     </label>
+    <label>New password (blank = keep)
+      <input type="password" name="new_password" minlength="8" placeholder="new password"
+             autocomplete="new-password">
+    </label>
+    <small>Changing the password signs out all existing sessions.</small>
   </article>
 
   <button type="submit">Save settings</button>

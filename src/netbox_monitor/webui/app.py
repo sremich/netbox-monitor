@@ -4,9 +4,12 @@ run-now triggers, and connection tests. Server-rendered Jinja2 + htmx."""
 from __future__ import annotations
 
 import asyncio
+import html
 import re
+import secrets
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import structlog
 from fastapi import FastAPI, Request
@@ -65,6 +68,18 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
 
     templates.env.filters["timestamp"] = _timestamp
 
+    @app.middleware("http")
+    async def csrf_origin_guard(request: Request, call_next):
+        # CSRF defense-in-depth (on top of the SameSite cookie): reject any
+        # state-changing request whose Origin/Referer host isn't our own.
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            source = request.headers.get("origin") or request.headers.get("referer")
+            if source:
+                src_host = urlparse(source).netloc
+                if src_host and src_host != request.headers.get("host"):
+                    return HTMLResponse("cross-origin request blocked", status_code=403)
+        return await call_next(request)
+
     # ------------------------------------------------------------------ auth
 
     def authed(request: Request) -> bool:
@@ -106,6 +121,7 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
             SESSION_COOKIE,
             make_session_token(store.get().webui.session_secret),
             httponly=True,
+            samesite="strict",
         )
         return response
 
@@ -122,7 +138,12 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
         if not verify_password(str(form.get("password") or ""), cfg.password_hash):
             return render(request, "login.html", error="Wrong password")
         response = RedirectResponse("/", status_code=303)
-        response.set_cookie(SESSION_COOKIE, make_session_token(cfg.session_secret), httponly=True)
+        response.set_cookie(
+            SESSION_COOKIE,
+            make_session_token(cfg.session_secret),
+            httponly=True,
+            samesite="strict",
+        )
         return response
 
     @app.get("/logout")
@@ -151,9 +172,11 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
     async def run_now(request: Request, module: str):
         if redirect := guard(request):
             return redirect
+        if module not in MODULES:
+            return HTMLResponse('<span class="flash">unknown module</span>', status_code=400)
         ok = engine.run_now(module) if engine else False
         message = f"{module} triggered" if ok else f"{module} is not currently scheduled"
-        return HTMLResponse(f'<span class="flash">{message}</span>')
+        return HTMLResponse(f'<span class="flash">{html.escape(message)}</span>')
 
     # -------------------------------------------------------------- settings
 
@@ -168,6 +191,28 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
         if redirect := guard(request):
             return redirect
         form = await request.form()
+
+        # password change is validated up front (needs the current password + length)
+        new_password = str(form.get("new_password") or "")
+        if new_password:
+            if not verify_password(
+                str(form.get("current_password") or ""), store.get().webui.password_hash
+            ):
+                return render(
+                    request,
+                    "settings.html",
+                    config=store.get(),
+                    saved=False,
+                    error="Current password is incorrect — password not changed.",
+                )
+            if len(new_password) < 8:
+                return render(
+                    request,
+                    "settings.html",
+                    config=store.get(),
+                    saved=False,
+                    error="New password must be at least 8 characters.",
+                )
 
         def apply(c):
             c.netbox.url = str(form.get("netbox_url") or "").strip().rstrip("/")
@@ -194,9 +239,10 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
             c.lldp.max_depth = max(1, int(form.get("lldp_max_depth") or 8))
             c.lldp.credentials = _lldp_credentials_from_form(form, c.lldp.credentials)
             c.lldp.exclude_hosts = _split_hosts(str(form.get("lldp_exclude_hosts") or ""))
-            new_password = str(form.get("new_password") or "")
             if new_password:
                 c.webui.password_hash = hash_password(new_password)
+                # rotate the session secret so existing cookies are invalidated
+                c.webui.session_secret = secrets.token_hex(32)
 
         try:
             store.update_field(apply)
@@ -308,7 +354,7 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
 
     def _test_fragment(ok: bool, detail: str) -> HTMLResponse:
         icon = "✅" if ok else "❌"
-        return HTMLResponse(f'<span class="test-result">{icon} {detail}</span>')
+        return HTMLResponse(f'<span class="test-result">{icon} {html.escape(detail)}</span>')
 
     @app.post("/test/netbox", response_class=HTMLResponse)
     async def test_netbox(request: Request):
@@ -316,7 +362,10 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
             return _test_fragment(False, "not authenticated")
         form = await request.form()
         url = str(form.get("netbox_url") or "").strip().rstrip("/")
-        token = str(form.get("netbox_token") or "").strip() or store.get().netbox.token
+        token = str(form.get("netbox_token") or "").strip()
+        if not token and _same_origin(url, store.get().netbox.url):
+            # only forward the saved token to the URL it belongs to (anti-SSRF/exfil)
+            token = store.get().netbox.token
         verify = form.get("netbox_verify_ssl") == "on"
 
         def check():
@@ -340,17 +389,13 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
         form = await request.form()
         from netbox_monitor.clients.technitium import TechnitiumClient
 
+        url = str(form.get("tech_url") or "").strip().rstrip("/")
         token = str(form.get("tech_token") or "").strip()
-        if not token:  # blank field = use the saved token
+        if not token:  # blank field = use the saved token, only for its own URL
             saved = _saved_site(form)
-            if saved and saved.technitium:
+            if saved and saved.technitium and _same_origin(url, saved.technitium.url):
                 token = saved.technitium.token
-        client = TechnitiumClient(
-            TechnitiumConfig(
-                url=str(form.get("tech_url") or "").strip().rstrip("/"),
-                token=token,
-            )
-        )
+        client = TechnitiumClient(TechnitiumConfig(url=url, token=token))
         try:
             zones = await client.list_zones()
             return _test_fragment(True, f"{len(zones)} zones visible")
@@ -411,6 +456,15 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
 
 
 # ------------------------------------------------------------- form parsing
+
+
+def _same_origin(a: str, b: str) -> bool:
+    """True if two URLs share scheme+host+port. Used to ensure a saved credential
+    is only ever forwarded to the URL it belongs to (anti-SSRF / anti-exfiltration)."""
+    if not a or not b:
+        return False
+    pa, pb = urlparse(a if "://" in a else f"//{a}"), urlparse(b if "://" in b else f"//{b}")
+    return (pa.scheme, pa.hostname, pa.port) == (pb.scheme, pb.hostname, pb.port)
 
 
 def _csv_list(value: str) -> list[str]:

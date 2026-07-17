@@ -23,16 +23,28 @@ class TechnitiumError(RuntimeError):
 class TechnitiumClient:
     def __init__(self, config: TechnitiumConfig):
         self.config = config
-        self._client = httpx.AsyncClient(base_url=config.url, timeout=30.0)
+        # Pass the token as a Bearer header, never in the URL query string. This
+        # keeps the secret out of httpx request logs AND out of any HTTP error
+        # message (which embeds the full URL). Do not add token= to params.
+        self._client = httpx.AsyncClient(
+            base_url=config.url,
+            timeout=30.0,
+            headers={"Authorization": f"Bearer {config.token}"},
+        )
 
     async def close(self) -> None:
         await self._client.aclose()
 
     async def _call(self, path: str, **params: Any) -> dict[str, Any]:
         params = {k: v for k, v in params.items() if v is not None}
-        params["token"] = self.config.token
-        resp = await self._client.get(path, params=params)
-        resp.raise_for_status()
+        try:
+            resp = await self._client.get(path, params=params)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # never let the URL (or anything token-bearing) escape into the message
+            raise TechnitiumError(f"{path}: HTTP {exc.response.status_code}") from None
+        except httpx.HTTPError as exc:
+            raise TechnitiumError(f"{path}: {type(exc).__name__}") from None
         data = resp.json()
         if data.get("status") != "ok":
             raise TechnitiumError(

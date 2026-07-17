@@ -93,6 +93,7 @@ class AvailabilitySync:
         stale_after = self.ctx.config.availability.stale_after
         already_stale = STALE_TAG_SLUG in nb.obj_tag_slugs(device)
         if already_stale:
+            await self._maybe_grace_delete(device, key, last_seen, now)
             return
         # never seen up: only stale it once it has been failing beyond the threshold
         unreachable_for = now - last_seen if last_seen else None
@@ -122,6 +123,35 @@ class AvailabilitySync:
 
         await asyncio.to_thread(mark_stale)
         await self.ctx.state.set_stale(key, True)
+
+    async def _maybe_grace_delete(
+        self, device: Any, key: str, last_seen: float | None, now: float
+    ) -> None:
+        """Delete discovered (src-scan) devices that have stayed stale beyond the
+        configured grace period. Only applies to ping-discovered hosts — reserved
+        DHCP infrastructure is never auto-deleted."""
+        grace_days = self.ctx.config.lifecycle.stale_grace_delete_days
+        if not grace_days or last_seen is None:
+            return
+        if "src-scan" not in self.ctx.netbox.obj_tag_slugs(device):
+            return
+        if (now - last_seen) < grace_days * 86400:
+            return
+        nb = self.ctx.netbox
+        log.warning(
+            "discovered host stale beyond grace period; deleting",
+            device=device.name,
+            days=grace_days,
+        )
+
+        def do_delete() -> None:
+            primary = getattr(device, "primary_ip4", None)
+            if primary and nb.is_managed(nb.api.ipam.ip_addresses.get(primary.id), "src-scan"):
+                nb.delete(nb.api.ipam.ip_addresses.get(primary.id), "src-scan")
+            nb.delete(device, "src-scan")
+
+        await asyncio.to_thread(do_delete)
+        await self.ctx.state.forget_host(key)
 
     def _monitored_devices(self) -> list[Any]:
         nb = self.ctx.netbox
