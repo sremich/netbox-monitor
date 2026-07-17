@@ -2,12 +2,14 @@
 
 from fastapi.testclient import TestClient
 
-from conftest import FakeStatus, login
+from conftest import FakeStatus, csrf_token, login
 from netbox_monitor import __version__
 from netbox_monitor.config import CONFIG_SCHEMA_VERSION
 from netbox_monitor.settings_store import SettingsStore
 from netbox_monitor.webui.app import _same_origin, create_app
 from netbox_monitor.webui.auth import verify_password
+
+PP = "correct-horse-battery-staple"
 
 
 def test_requires_login(client):
@@ -356,3 +358,169 @@ def test_footer_renders_on_setup(tmp_path):
     store = SettingsStore.bootstrap(tmp_path / "fresh", None)
     fresh = TestClient(create_app(store, None, FakeStatus()), follow_redirects=False)
     assert f"v{__version__}" in fresh.get("/setup").text
+
+
+# ------------------------------------------------------- backup / restore
+
+
+def _configured(store):
+    store.update_field(
+        lambda c: (
+            setattr(c.netbox, "url", "https://netbox.test"),
+            setattr(c.netbox, "token", "NBTOKEN"),
+        )
+    )
+
+
+def test_backup_page_requires_auth(client):
+    assert client.get("/backup").status_code == 303
+
+
+def test_backup_page_loads(client):
+    login(client)
+    response = client.get("/backup")
+    assert response.status_code == 200
+    assert "Backup &amp; restore" in response.text or "Backup & restore" in response.text
+
+
+def test_export_downloads_a_file_and_is_not_cacheable(client, store):
+    login(client)
+    _configured(store)
+    response = client.post(
+        "/backup/export",
+        data={"mode": "encrypted", "passphrase": PP, "passphrase_confirm": PP},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert "attachment" in response.headers["content-disposition"]
+    assert ".json" in response.headers["content-disposition"]
+    # an encrypted export is every token the user owns
+    assert response.headers["cache-control"] == "no-store"
+    assert b"NBTOKEN" not in response.content  # encrypted, not merely wrapped
+
+
+def test_export_redacted_strips_secrets(client, store):
+    login(client)
+    _configured(store)
+    response = client.post("/backup/export", data={"mode": "redacted"})
+    assert response.status_code == 200
+    assert b"NBTOKEN" not in response.content
+    assert b"__REDACTED__" in response.content
+
+
+def test_export_rejects_mismatched_passphrases(client, store):
+    login(client)
+    response = client.post(
+        "/backup/export",
+        data={"mode": "encrypted", "passphrase": PP, "passphrase_confirm": "different"},
+    )
+    assert response.status_code == 200
+    assert "do not match" in response.text
+
+
+def test_export_rejects_short_passphrase(client, store):
+    login(client)
+    response = client.post(
+        "/backup/export",
+        data={"mode": "encrypted", "passphrase": "abc", "passphrase_confirm": "abc"},
+    )
+    assert "at least" in response.text
+
+
+def _export_blob(client, store) -> bytes:
+    _configured(store)
+    return client.post(
+        "/backup/export", data={"mode": "encrypted", "passphrase": PP, "passphrase_confirm": PP}
+    ).content
+
+
+def test_import_round_trip_applies_config_and_bumps_generation(client, store):
+    login(client)
+    blob = _export_blob(client, store)
+    store.update_field(lambda c: setattr(c.netbox, "token", "REPLACED"))
+    generation = store.generation
+
+    response = client.post(
+        "/backup/import",
+        data={"confirm": "on", "passphrase": PP, "csrf": csrf_token(store)},
+        files={"file": ("cfg.json", blob, "application/json")},
+    )
+    assert response.status_code == 200
+    assert "Imported from" in response.text
+    assert store.get().netbox.token == "NBTOKEN"
+    # generation bumped -> the scheduler hot-reloads, no restart needed
+    assert store.generation > generation
+    assert (store.path.parent / "settings.json.bak").exists()
+
+
+def test_import_requires_confirm(client, store):
+    login(client)
+    blob = _export_blob(client, store)
+    response = client.post(
+        "/backup/import",
+        data={"passphrase": PP, "csrf": csrf_token(store)},
+        files={"file": ("cfg.json", blob, "application/json")},
+    )
+    assert "confirmation not checked" in response.text
+
+
+def test_import_requires_a_valid_csrf_token(client, store):
+    login(client)
+    blob = _export_blob(client, store)
+    response = client.post(
+        "/backup/import",
+        data={"confirm": "on", "passphrase": PP, "csrf": "forged"},
+        files={"file": ("cfg.json", blob, "application/json")},
+    )
+    assert "invalid CSRF token" in response.text
+
+
+def test_import_requires_auth(client):
+    assert client.post("/backup/import", data={"confirm": "on"}).status_code == 401
+
+
+def test_import_reports_a_wrong_passphrase(client, store):
+    login(client)
+    blob = _export_blob(client, store)
+    response = client.post(
+        "/backup/import",
+        data={"confirm": "on", "passphrase": "wrong-passphrase-x", "csrf": csrf_token(store)},
+        files={"file": ("cfg.json", blob, "application/json")},
+    )
+    assert "wrong passphrase" in response.text
+
+
+def test_import_rejects_a_foreign_file(client, store):
+    login(client)
+    response = client.post(
+        "/backup/import",
+        data={"confirm": "on", "csrf": csrf_token(store)},
+        files={"file": ("nope.json", b'{"not": "ours"}', "application/json")},
+    )
+    assert "netbox-monitor config export" in response.text
+
+
+def test_import_rejects_an_oversized_file(client, store):
+    login(client)
+    response = client.post(
+        "/backup/import",
+        data={"confirm": "on", "csrf": csrf_token(store)},
+        files={"file": ("big.json", b"x" * (2 << 20), "application/json")},
+    )
+    assert "too large" in response.text
+
+
+def test_import_never_changes_the_login(client, store):
+    """A hostile export must not be able to hand over the admin session."""
+    login(client)
+    blob = _export_blob(client, store)
+    before = store.get().webui
+
+    client.post(
+        "/backup/import",
+        data={"confirm": "on", "passphrase": PP, "csrf": csrf_token(store)},
+        files={"file": ("cfg.json", blob, "application/json")},
+    )
+    after = store.get().webui
+    assert after.password_hash == before.password_hash
+    assert after.session_secret == before.session_secret

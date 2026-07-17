@@ -1,4 +1,4 @@
-"""Password hashing (stdlib PBKDF2) and signed session cookies."""
+"""Password hashing (stdlib PBKDF2), signed session cookies, and CSRF tokens."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 ITERATIONS = 300_000
 SESSION_COOKIE = "nbm_session"
 SESSION_MAX_AGE = 7 * 24 * 3600
+CSRF_MAX_AGE = 12 * 3600
 
 
 def hash_password(password: str) -> str:
@@ -42,5 +43,26 @@ def check_session_token(secret: str, token: str | None) -> bool:
             token, max_age=SESSION_MAX_AGE
         )
         return bool(data.get("auth"))
+    except BadSignature:
+        return False
+
+
+def make_csrf_token(secret: str) -> str:
+    """A signed token for destructive forms.
+
+    The origin/referer middleware fails open when neither header is present; for a
+    request that replaces the whole configuration that is too thin a guarantee, so
+    those forms carry a token as well. Signed with the session secret, so rotating
+    the password (which rotates the secret) invalidates outstanding tokens too.
+    """
+    return URLSafeTimedSerializer(secret, salt="nbm-csrf").dumps({"csrf": True})
+
+
+def check_csrf_token(secret: str, token: str | None) -> bool:
+    if not token:
+        return False
+    try:
+        data = URLSafeTimedSerializer(secret, salt="nbm-csrf").loads(token, max_age=CSRF_MAX_AGE)
+        return bool(data.get("csrf"))
     except BadSignature:
         return False

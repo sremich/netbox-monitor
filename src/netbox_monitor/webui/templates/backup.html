@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Backup — netbox-monitor{% endblock %}
+{% block content %}
+<h2>Backup &amp; restore</h2>
+{% if error %}<article class="warn">{{ error }}</article>{% endif %}
+
+<p>
+  Move this instance's configuration — sites, tokens, switch credentials and module
+  settings — to another instance, or keep a copy somewhere safe. Your web UI password
+  is never included, so restoring can't lock you out.
+</p>
+
+<article>
+  <header><strong>Export</strong></header>
+  {# a plain POST, not hx-post: htmx cannot swap a file download #}
+  <form method="post" action="/backup/export">
+    <fieldset>
+      <label>
+        <input type="radio" name="mode" value="encrypted" checked>
+        <strong>Encrypted</strong> — includes every credential. Use this to move or back up a setup.
+      </label>
+      <label>
+        <input type="radio" name="mode" value="redacted">
+        <strong>Redacted</strong> — no passphrase, every secret stripped. Safe to diff or share.
+      </label>
+    </fieldset>
+
+    <label>Passphrase
+      <input type="password" name="passphrase" autocomplete="new-password"
+             placeholder="at least {{ min_passphrase }} characters (encrypted mode only)">
+    </label>
+    <label>Confirm passphrase
+      <input type="password" name="passphrase_confirm" autocomplete="new-password">
+    </label>
+
+    <article class="warn">
+      <small>
+        An encrypted export contains every token and password this instance holds — the
+        passphrase is the only thing protecting it. There is no recovery if you lose it.
+      </small>
+    </article>
+
+    <button type="submit">Download config</button>
+  </form>
+</article>
+
+<article>
+  <header><strong>Restore</strong></header>
+  <form id="import-form" hx-post="/backup/import" hx-encoding="multipart/form-data"
+        hx-target="#import-result" hx-swap="innerHTML"
+        hx-confirm="Replace this instance's entire configuration with the uploaded file?">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Config file
+      <input type="file" name="file" accept="application/json,.json" required>
+    </label>
+    <label>Passphrase
+      <input type="password" name="passphrase" autocomplete="off"
+             placeholder="required only for an encrypted export">
+    </label>
+    <label>
+      <input type="checkbox" name="confirm">
+      I understand this replaces the current configuration
+    </label>
+    <small>
+      The current configuration is copied to <code>settings.json.bak</code> first, and the
+      sync engine picks up the new one within a couple of seconds — no restart needed.
+      Secrets marked redacted keep their current values.
+    </small>
+    <button type="submit" class="danger">Restore config</button>
+  </form>
+  <div id="import-result"></div>
+</article>
+{% endblock %}

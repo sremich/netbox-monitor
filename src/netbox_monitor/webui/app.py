@@ -13,15 +13,17 @@ from typing import Any
 from urllib.parse import urlparse
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from netbox_monitor import __version__
+from netbox_monitor import __version__, config_transfer
 from netbox_monitor.clients.netbox import NetBoxClient, slugify
 from netbox_monitor.config import (
     CONFIG_SCHEMA_VERSION,
+    ConfigSchemaTooNewError,
     LifecycleConfig,
     LldpCredential,
     ProxmoxInstance,
@@ -36,8 +38,10 @@ from netbox_monitor.status import StatusRegistry
 from netbox_monitor.sync import cleanup
 from netbox_monitor.webui.auth import (
     SESSION_COOKIE,
+    check_csrf_token,
     check_session_token,
     hash_password,
+    make_csrf_token,
     make_session_token,
     verify_password,
 )
@@ -49,6 +53,10 @@ BASE_DIR = Path(__file__).parent
 # hardcoded rather than read from [project.urls]: pytest runs with pythonpath=src,
 # where the package imports but has no dist metadata to read.
 REPO_URL = "https://github.com/sremich/netbox-monitor"
+
+# a config export is a few KB; anything near this is not one. Starlette spools a
+# large upload to disk, but .read() would still pull it all into memory.
+MAX_IMPORT_BYTES = 1 << 20
 
 MODULES = ["dhcp", "dns", "discovery", "availability", "proxmox", "lldp", "certs"]
 MODULE_LABELS = {
@@ -133,8 +141,17 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
         return None
 
     def render(request: Request, template: str, **ctx: Any) -> HTMLResponse:
+        # csrf goes here rather than in env.globals: it is per-request and needs the
+        # store, unlike the constant version/repo_url globals above
         return templates.TemplateResponse(
-            request, template, {"modules": MODULES, "module_labels": MODULE_LABELS, **ctx}
+            request,
+            template,
+            {
+                "modules": MODULES,
+                "module_labels": MODULE_LABELS,
+                "csrf": make_csrf_token(store.get().webui.session_secret),
+                **ctx,
+            },
         )
 
     @app.get("/setup", response_class=HTMLResponse)
@@ -429,6 +446,108 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
         return HTMLResponse(
             f'<span class="okbox">{verb} <strong>{result.total}</strong> objects '
             f"({html.escape(detail)}){rerun}.</span>"
+        )
+
+    # --------------------------------------------------------- backup/restore
+
+    @app.get("/backup", response_class=HTMLResponse)
+    async def backup_page(request: Request):
+        if redirect := guard(request):
+            return redirect
+        return render(request, "backup.html", min_passphrase=config_transfer.MIN_PASSPHRASE)
+
+    @app.post("/backup/export")
+    async def backup_export(request: Request):
+        if redirect := guard(request):
+            return redirect
+        form = await request.form()
+        encrypted = form.get("mode") != "redacted"
+        passphrase = str(form.get("passphrase") or "")
+
+        if encrypted:
+            if passphrase != str(form.get("passphrase_confirm") or ""):
+                return render(request, "backup.html", error="Passphrases do not match.")
+            if len(passphrase) < config_transfer.MIN_PASSPHRASE:
+                least = config_transfer.MIN_PASSPHRASE
+                return render(
+                    request,
+                    "backup.html",
+                    error=f"Passphrase must be at least {least} characters.",
+                )
+        try:
+            blob = config_transfer.export_config(
+                store.get(), passphrase=passphrase if encrypted else None
+            )
+        except config_transfer.ConfigTransferError as exc:
+            return render(request, "backup.html", error=str(exc))
+
+        filename = config_transfer.export_filename(__version__, encrypted)
+        return Response(
+            content=blob,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                # an encrypted export is every token the user owns — never cache it
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.post("/backup/import", response_class=HTMLResponse)
+    async def backup_import(request: Request):
+        if not authed(request):
+            return HTMLResponse("not authenticated", status_code=401)
+        form = await request.form()
+        if not check_csrf_token(store.get().webui.session_secret, str(form.get("csrf") or "")):
+            return HTMLResponse('<span class="error">invalid CSRF token — reload the page</span>')
+        if form.get("confirm") != "on":
+            return HTMLResponse('<span class="error">confirmation not checked</span>')
+
+        upload = form.get("file")
+        if not isinstance(upload, StarletteUploadFile) or not upload.filename:
+            return HTMLResponse('<span class="error">no file chosen</span>')
+
+        declared = request.headers.get("content-length")
+        if declared and int(declared) > MAX_IMPORT_BYTES:
+            return HTMLResponse('<span class="error">file too large</span>')
+        blob = await upload.read()
+        if len(blob) > MAX_IMPORT_BYTES:  # the header is advisory; the read is not
+            return HTMLResponse('<span class="error">file too large</span>')
+
+        try:
+            result = config_transfer.import_config(
+                blob, passphrase=str(form.get("passphrase") or "") or None, current=store.get()
+            )
+        except (config_transfer.ConfigTransferError, ConfigSchemaTooNewError) as exc:
+            return HTMLResponse(f'<span class="error">{html.escape(str(exc)[:200])}</span>')
+        except Exception as exc:  # malformed payload that still parsed as JSON
+            log.warning("config import failed", error=str(exc))
+            return HTMLResponse(
+                f'<span class="error">could not import: {html.escape(str(exc)[:200])}</span>'
+            )
+
+        # replace() bumps the generation; the scheduler reloads within ~2s
+        store.replace(result.config, backup=True)
+        log.info(
+            "config imported",
+            source_app_version=result.source_app_version,
+            encrypted=result.encrypted,
+            unresolved=list(result.unresolved_secrets),
+        )
+
+        note = f"Imported from v{html.escape(result.source_app_version)}"
+        if result.migrated_from is not None:
+            note += f" (migrated from config schema {result.migrated_from})"
+        warning = ""
+        if result.unresolved_secrets:
+            paths = ", ".join(html.escape(p) for p in result.unresolved_secrets)
+            warning = (
+                f'<br><small class="error">{len(result.unresolved_secrets)} secret(s) could not '
+                f"be restored and are now blank: {paths}. Set them on the Settings/Sites "
+                "pages.</small>"
+            )
+        return HTMLResponse(
+            f'<span class="okbox">{note}. The previous config was saved to '
+            f"settings.json.bak.{warning}</span>"
         )
 
     # ------------------------------------------------------- NetBox pickers
