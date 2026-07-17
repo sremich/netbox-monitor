@@ -7,6 +7,7 @@ import asyncio
 import html
 import re
 import secrets
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -17,8 +18,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from netbox_monitor import __version__
 from netbox_monitor.clients.netbox import NetBoxClient, slugify
 from netbox_monitor.config import (
+    CONFIG_SCHEMA_VERSION,
     LifecycleConfig,
     LldpCredential,
     ProxmoxInstance,
@@ -43,6 +46,10 @@ log = structlog.get_logger(__name__)
 
 BASE_DIR = Path(__file__).parent
 
+# hardcoded rather than read from [project.urls]: pytest runs with pythonpath=src,
+# where the package imports but has no dist metadata to read.
+REPO_URL = "https://github.com/sremich/netbox-monitor"
+
 MODULES = ["dhcp", "dns", "discovery", "availability", "proxmox", "lldp", "certs"]
 MODULE_LABELS = {
     "dhcp": "DHCP leases",
@@ -59,6 +66,7 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
     app = FastAPI(title="netbox-monitor", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
     templates = Jinja2Templates(directory=BASE_DIR / "templates")
+    started = time.monotonic()
 
     def _timestamp(value: float | None) -> str:
         if not value:
@@ -68,6 +76,35 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
         return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
 
     templates.env.filters["timestamp"] = _timestamp
+    # globals, not render() context: these are constants, and a template rendered
+    # outside render() would otherwise lose its footer silently
+    templates.env.globals["version"] = __version__
+    templates.env.globals["repo_url"] = REPO_URL
+
+    # --------------------------------------------------------------- health
+
+    @app.get("/healthz")
+    async def healthz() -> JSONResponse:
+        """Liveness for container healthchecks — deliberately unauthenticated, since
+        Docker's HEALTHCHECK carries no session cookie.
+
+        Reports only non-identifying facts: no URLs, no site names, no config. The
+        status never depends on NetBox being reachable and the code is always 200 —
+        a NetBox outage that made Docker kill the monitor would just amplify it.
+        Degradation belongs in a field, not the status code.
+        """
+        cfg = store.get()
+        return JSONResponse(
+            {
+                "status": "ok",
+                "version": __version__,
+                "config_schema": CONFIG_SCHEMA_VERSION,
+                "configured": bool(cfg.netbox.configured),
+                "sites": len(cfg.sites),
+                "engine": "running" if engine is not None else "disabled",
+                "uptime_s": round(time.monotonic() - started, 1),
+            }
+        )
 
     @app.middleware("http")
     async def csrf_origin_guard(request: Request, call_next):

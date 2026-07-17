@@ -30,6 +30,20 @@ services:
       # - ./config.yaml:/app/config.yaml:ro
       # optional netbox-secrets RSA key for LLDP per-device credentials:
       # - ./secrets_private_key.pem:/app/secrets_private_key.pem:ro
+      # optional: restore an encrypted config export on first boot (see below)
+      # - ./netbox-monitor-config.json:/app/restore.json:ro
+    # the image has no curl; python is always there. Lives here rather than in the
+    # Dockerfile because the port is configurable and --no-webui is supported.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8899/healthz', timeout=3).status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
 
 volumes:
   netbox-monitor-data:

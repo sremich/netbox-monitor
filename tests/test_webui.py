@@ -3,6 +3,8 @@
 from fastapi.testclient import TestClient
 
 from conftest import FakeStatus, login
+from netbox_monitor import __version__
+from netbox_monitor.config import CONFIG_SCHEMA_VERSION
 from netbox_monitor.settings_store import SettingsStore
 from netbox_monitor.webui.app import _same_origin, create_app
 from netbox_monitor.webui.auth import verify_password
@@ -293,3 +295,64 @@ def test_site_lldp_settings(client, store):
     edit.pop("lldp_enabled")
     assert client.post("/sites/lab", data=edit).status_code == 303
     assert store.get().sites[0].lldp.enabled is False
+
+
+# ------------------------------------------------------- footer + healthz
+
+
+def test_healthz_is_unauthenticated_and_reports_shape(client):
+    """Docker's healthcheck carries no cookie, so this must answer without auth."""
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["version"] == __version__
+    assert body["configured"] is False  # nothing set up in this fixture
+    assert body["config_schema"] == CONFIG_SCHEMA_VERSION
+    assert isinstance(body["uptime_s"], float)
+
+
+def test_healthz_leaks_no_configuration(client, store):
+    store.update_field(
+        lambda c: (
+            setattr(c.netbox, "url", "https://netbox.internal.example"),
+            setattr(c.netbox, "token", "SEKRIT"),
+        )
+    )
+    body = client.get("/healthz").text
+    assert "netbox.internal.example" not in body
+    assert "SEKRIT" not in body
+    assert client.get("/healthz").json()["configured"] is True
+
+
+def test_healthz_stays_ok_when_netbox_is_unreachable(client, store):
+    """Health must not depend on NetBox: a NetBox outage restarting the container
+    would only amplify the outage."""
+    store.update_field(
+        lambda c: (
+            setattr(c.netbox, "url", "http://192.0.2.1:9999"),  # TEST-NET-1, unroutable
+            setattr(c.netbox, "token", "t"),
+        )
+    )
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_footer_shows_version_and_github_link(client):
+    login(client)
+    body = client.get("/").text
+    assert f"netbox-monitor v{__version__}" in body
+    assert "https://github.com/sremich/netbox-monitor" in body
+
+
+def test_footer_renders_on_unauthenticated_pages(client):
+    """login/setup extend base.html — a version injected via the render() context
+    instead of a Jinja global would silently vanish here."""
+    assert f"v{__version__}" in client.get("/login").text
+
+
+def test_footer_renders_on_setup(tmp_path):
+    store = SettingsStore.bootstrap(tmp_path / "fresh", None)
+    fresh = TestClient(create_app(store, None, FakeStatus()), follow_redirects=False)
+    assert f"v{__version__}" in fresh.get("/setup").text
