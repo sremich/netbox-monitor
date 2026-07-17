@@ -1,21 +1,35 @@
+# netbox-monitor — quick start:
+#
+#   docker compose up -d
+#   → then open http://<this-host>:8899 and set a password on first visit.
+#
+# No .env or config.yaml is required. Everything is configured in the web UI and
+# persisted in the named volume. (To pre-set the UI password or seed tokens,
+# create a .env from .env.example — the optional env_file below is picked up
+# automatically when present.)
+
 services:
   netbox-monitor:
     image: ghcr.io/sremich/netbox-monitor:latest
-    build: .
+    # to build from this checkout instead of pulling, run:
+    #   docker compose build   (or add `build: .` here)
     restart: unless-stopped
-    # host networking: ping sweeps + ARP need to sit on the real LAN,
-    # ideally on a host with interfaces in every scanned VLAN
+    # host networking: ping discovery + ARP must sit on the real LAN, and it makes
+    # the web UI reachable at http://<host>:8899 with no port mapping.
     network_mode: host
     cap_add:
-      - NET_RAW
+      - NET_RAW # raw ICMP sockets for ping discovery
       - NET_ADMIN
-    env_file: .env
+    # optional — loaded only if a .env file exists (never fails a fresh start)
+    env_file:
+      - path: .env
+        required: false
     volumes:
-      # optional seed config; live settings persist in the data volume (web UI)
-      - ./config.yaml:/app/config.yaml:ro
       - netbox-monitor-data:/app/data
+      # optional seed config (otherwise configure everything in the web UI):
+      # - ./config.yaml:/app/config.yaml:ro
+      # optional netbox-secrets RSA key for LLDP per-device credentials:
       # - ./secrets_private_key.pem:/app/secrets_private_key.pem:ro
-    # web UI: http://<host>:8899 (host networking, no port mapping needed)
 
 volumes:
   netbox-monitor-data:

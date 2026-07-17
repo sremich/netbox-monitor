@@ -36,43 +36,87 @@ The live config persists in `data/settings.json` (keep the data volume!); `confi
 is only imported on first start when no settings.json exists. **v1 configs migrate
 automatically** into a single site.
 
-## Setup
+## Quick start
 
-### 1. Tokens
+Everything is configured in the **web UI** — no config files are required to start.
+You need a Linux host with Docker, ideally one that can reach every VLAN you want to
+scan (ARP-based MAC/vendor enrichment only works for L2-adjacent subnets).
 
-- **NetBox**: create an API token (Admin → API Tokens) with write access.
-- **Technitium**: create a permanent API token:
-  `curl "http://10.0.0.2:5380/api/user/createToken?user=admin&pass=...&tokenName=netbox-monitor"`
-- **Proxmox**: create an API token (Datacenter → Permissions → API Tokens), e.g. user
-  `monitor@pve`, token `netbox-monitor`, with the `PVEAuditor` role on `/`.
+### Option A — straight from the published image (no clone)
 
-### 2. Configure
+Create one file, `docker-compose.yml`:
 
-```sh
-cp config.example.yaml config.yaml
-cp .env.example .env      # fill in tokens
+```yaml
+services:
+  netbox-monitor:
+    image: ghcr.io/sremich/netbox-monitor:latest
+    restart: unless-stopped
+    network_mode: host          # web UI on http://<host>:8899, and LAN access for discovery
+    cap_add: [NET_RAW, NET_ADMIN]  # raw ICMP for ping discovery
+    # environment:
+    #   - WEBUI_PASSWORD=change-me   # optional: skip the first-run password prompt
+    volumes:
+      - netbox-monitor-data:/app/data
+volumes:
+  netbox-monitor-data:
 ```
 
-### 3. First run — dry-run
-
-Set `dry_run: true` in `config.yaml` (or pass `--dry-run`) and watch the logs: every
-NetBox write is logged but not executed. Run a single module with
-`netbox-monitor --once dhcp` (also: `dns`, `discovery`, `availability`, `proxmox`,
-`lldp`, `certs`).
-
-### 4. Deploy (Docker on Linux)
+Then:
 
 ```sh
 docker compose up -d
 ```
 
-The compose file uses **host networking** + `NET_RAW` so ICMP sweeps and ARP reads work.
-Run it on a host that can reach every VLAN you want scanned (MAC harvesting via ARP only
-works for L2-adjacent subnets). Enable modules one at a time in `config.yaml` if you
-prefer a gradual rollout.
+Or a one-liner with no compose file at all:
 
-Images are published to `ghcr.io/sremich/netbox-monitor` by CI on every push to `main`;
-deployment is `docker compose pull && docker compose up -d`.
+```sh
+docker run -d --name netbox-monitor --restart unless-stopped \
+  --network host --cap-add NET_RAW --cap-add NET_ADMIN \
+  -v netbox-monitor-data:/app/data \
+  ghcr.io/sremich/netbox-monitor:latest
+```
+
+### Option B — clone the repo
+
+```sh
+git clone https://github.com/sremich/netbox-monitor
+cd netbox-monitor
+docker compose up -d        # pulls the image; no .env or config.yaml needed
+```
+
+(To build the image from source instead of pulling: `docker compose build` first, or
+add `build: .` under the service.)
+
+### First run
+
+1. Open **http://\<host\>:8899** and set an admin password (or pre-set `WEBUI_PASSWORD`).
+2. **Settings → NetBox**: enter your NetBox URL + an API token (Admin → API Tokens, write
+   access) and hit *Test*.
+3. **Sites → Add site**: pick/create a NetBox Site and add that site's Technitium
+   instance, Proxmox instance(s), and scan scope — each section has a *Test* button.
+   - *Technitium* token: `curl "http://<dns>:5380/api/user/createToken?user=admin&pass=...&tokenName=netbox-monitor"`
+   - *Proxmox* token: Datacenter → Permissions → API Tokens, e.g. `monitor@pve` /
+     `netbox-monitor`, with the `PVEAuditor` role on `/`.
+4. Toggle modules on and adjust intervals under **Settings**. Turn on **dry-run** first
+   if you want to watch what it *would* write before it writes anything.
+
+Config edits apply immediately (the engine hot-reloads). Everything persists in the
+`netbox-monitor-data` volume — **keep that volume** across upgrades. Upgrade with
+`docker compose pull && docker compose up -d`.
+
+> Optional: a `.env` file (see `.env.example`) can pre-seed `WEBUI_PASSWORD` and tokens,
+> and `config.yaml` (see `config.example.yaml`) can seed the whole config on first start
+> — both are optional and the compose file works without them.
+
+### Headless / CLI
+
+The image also runs a single module once and exits (useful for cron or testing):
+
+```sh
+docker compose run --rm netbox-monitor --once dhcp --dry-run
+```
+
+Modules: `dhcp`, `dns`, `discovery`, `availability`, `proxmox`, `lldp`, `certs`.
 
 ### LLDP topology crawl (optional)
 
