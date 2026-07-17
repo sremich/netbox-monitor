@@ -152,6 +152,20 @@ credentials take precedence.
 > `access-class`). Permit the host running netbox-monitor, or the crawl will log those
 > switches as unreachable (it stops after one connection-reset rather than retrying).
 
+**A switch isn't being polled?** The dashboard status names each failed host with the
+drivers tried and the error each returned (e.g. `10.0.0.5: cisco/TimeoutError`); the log
+carries the full messages. Two common causes:
+
+- **SSH doesn't work on that model.** Some switches (e.g. Cisco Small Business SG300)
+  only offer crypto too old to negotiate, but answer **SNMP** fine. Set an SNMP community
+  in the site's LLDP settings or a credential profile — with no community configured the
+  SNMP driver is never tried and the switch just fails every SSH attempt.
+- **The seed is on the wrong site.** Seeds are looked up *per site*, so an
+  `lldp-source` switch whose NetBox Site isn't one of your configured sites is never
+  polled — easy to miss after moving sites. The log flags these at startup
+  (*"lldp seed switch is at a site with no LLDP-enabled config"*); fix it by moving the
+  device to the right Site in NetBox.
+
 **Protecting production gear.** Two safeguards keep the crawl from ever hammering a
 router/firewall:
 

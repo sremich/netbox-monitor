@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "netbox-monitor"
-version = "2.2.0"
+version = "2.2.1"
 description = "Network auto-documentation service: syncs Technitium DNS/DHCP, ping discovery, Proxmox, LLDP topology, and SSL certs into NetBox"
 readme = "README.md"
 requires-python = ">=3.12"

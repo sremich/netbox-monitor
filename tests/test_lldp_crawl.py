@@ -161,3 +161,58 @@ def test_dead_switch_does_not_abort(ctx):
     run_lldp(ctx, topo)
     # sw-c still got polled/created despite sw-b failing
     assert nb.api.dcim.devices.get(name="sw-c") is not None
+
+
+class _LogRecorder:
+    """Captures structlog calls so a diagnostic can be asserted on."""
+
+    def __init__(self):
+        self.warnings: list[tuple[str, dict]] = []
+
+    def warning(self, event, **kw):
+        self.warnings.append((event, kw))
+
+    def info(self, *a, **kw):
+        pass
+
+    debug = exception = info
+
+
+def test_failed_switch_reports_why_in_status(ctx):
+    """A switch that no driver/credential works for must say *why* — otherwise it is
+    indistinguishable from one that was never tried."""
+    seed_switch(ctx.netbox, "sw-a", "10.0.0.1")
+    run_lldp(ctx, {})  # nothing reachable -> the collector raises
+
+    _module, _scope, ok, message = ctx.status.records[-1]
+    assert not ok
+    assert "10.0.0.1" in message
+    assert "RuntimeError" in message  # the actual failure type, not just "unreachable"
+
+
+def test_seed_at_unconfigured_site_is_reported(ctx, monkeypatch):
+    """Seeds are looked up per site, so an lldp-source switch left on an old site is
+    silently never polled. It must at least be flagged."""
+    nb = ctx.netbox
+    other = nb.api.dcim.sites.create(name="Old Site", slug="old-site")
+    tag = nb.api.extras.tags.get(slug="lldp-source") or nb.api.extras.tags.create(
+        name="lldp-source", slug="lldp-source"
+    )
+    nb.api.dcim.devices.create(
+        name="sw-stranded",
+        site=SimpleNamespace(id=other.id, slug="old-site"),
+        platform=SimpleNamespace(slug="mikrotik"),
+        primary_ip4=SimpleNamespace(address="10.9.9.9/24"),
+        tags=[tag],
+    )
+    seed_switch(nb, "sw-a", "10.0.0.1")  # a normal seed at the configured site
+
+    rec = _LogRecorder()
+    monkeypatch.setattr(lldp_mod, "log", rec)
+    calls = run_lldp(ctx, {"10.0.0.1": []})
+
+    assert any(
+        "never be polled" in event and kw.get("switch") == "sw-stranded"
+        for event, kw in rec.warnings
+    )
+    assert "10.9.9.9" not in [h for _d, h in calls]  # still not polled — only reported

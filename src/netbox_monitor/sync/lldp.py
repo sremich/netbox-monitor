@@ -68,6 +68,7 @@ class CrawlTarget:
     depth: int
     sys_descr: str | None = None
     chassis_mac: str | None = None
+    last_error: str | None = None  # why every driver/credential failed, for the status line
 
 
 @dataclass
@@ -98,6 +99,7 @@ class LldpSync:
         if not sites:
             log.info("no sites with LLDP enabled")
             return
+        await self._warn_stranded_seeds(sites)
         if self.ctx.config.lldp.secrets_private_key:
             self._secrets = SecretsClient(
                 self.ctx.config.netbox.url,
@@ -128,6 +130,28 @@ class LldpSync:
             if self._secrets is not None:
                 await self._secrets.close()
                 self._secrets = None
+
+    async def _warn_stranded_seeds(self, sites: list[ResolvedSite]) -> None:
+        """Flag ``lldp-source`` switches sitting at a NetBox site that no LLDP-enabled
+        site maps to. Seeds are looked up per site, so these are silently never polled
+        — most often a device left behind on an old site after a site migration."""
+        nb = self.ctx.netbox
+        tag_slug = slugify(self.ctx.config.lldp.source_tag)
+        try:
+            seeds = await asyncio.to_thread(nb.filter_tagged, nb.api.dcim.devices, tag_slug)
+        except Exception as exc:  # diagnostics only — never fail the run over this
+            log.debug("could not check for stranded LLDP seeds", error=str(exc))
+            return
+        covered = {s.netbox_site_id for s in sites}
+        for dev in seeds:
+            site = getattr(dev, "site", None)
+            if getattr(site, "id", site) not in covered:
+                log.warning(
+                    "lldp seed switch is at a site with no LLDP-enabled config; "
+                    "it will never be polled",
+                    switch=getattr(dev, "name", "?"),
+                    site=str(getattr(dev, "site", None)),
+                )
 
     # ------------------------------------------------------------------ crawl
 
@@ -198,7 +222,9 @@ class LldpSync:
             poll = await self._poll_target(target, site, profiles)
             if poll is None:
                 stats.failed += 1
-                stats.failures.append(f"{target.host} unreachable/no working credential")
+                stats.failures.append(
+                    f"{target.host}: {target.last_error or 'unreachable/no working credential'}"
+                )
                 continue
             neighbors, cred, driver = poll
             stats.polled += 1
@@ -260,8 +286,12 @@ class LldpSync:
         # host (protects production gear from credential-spray lockouts)
         max_attempts = self.ctx.config.lldp.max_auth_attempts
         ssh_unreachable = False  # a pre-auth reset means every SSH driver will fail alike
+        tried: list[str] = []  # "driver/ErrorType" per failed attempt, for diagnostics
+        details: list[str] = []
+        capped = False
         for attempt_num, (driver, cred) in enumerate(attempts):
             if attempt_num >= max_attempts:
+                capped = True
                 log.info(
                     "lldp: auth attempt cap reached; giving up on host",
                     host=target.host,
@@ -288,11 +318,34 @@ class LldpSync:
                 )
                 return neighbors, cred, driver
             except Exception as exc:
+                tried.append(f"{driver}/{type(exc).__name__}")
+                # some exceptions (e.g. TimeoutError) stringify to "" — fall back to the type
+                detail = str(exc) or type(exc).__name__
+                details.append(
+                    f"{driver} ({cred.name if cred else 'netbox-secrets'}): {detail}"[:200]
+                )
                 log.debug("lldp attempt failed", host=target.host, driver=driver, error=str(exc))
                 if driver in registry.SSH_DRIVERS and _is_connection_error(exc):
                     # host rejects SSH at the transport level (reset/refused/timeout);
                     # other SSH drivers/creds will hit the same wall — stop trying them
                     ssh_unreachable = True
+
+        # Nothing worked. Report *why* at info level: at the default log level a
+        # silently-skipped switch is indistinguishable from one that was never tried.
+        if not attempts:
+            target.last_error = "no driver/credential available to try"
+        elif tried:
+            target.last_error = ", ".join(tried) + (" (attempt cap reached)" if capped else "")
+        else:
+            target.last_error = (
+                "no credential tried (attempt cap reached)" if capped else "unreachable"
+            )
+        log.info(
+            "lldp: no working driver/credential for host",
+            host=target.host,
+            tried=target.last_error,
+            errors=details,
+        )
         return None
 
     async def _build_attempts(
