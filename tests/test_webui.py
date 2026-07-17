@@ -95,6 +95,47 @@ def test_cross_origin_post_blocked(client):
     assert response.status_code == 403
 
 
+def test_netbox_test_never_forwards_token_to_foreign_url(client, store, monkeypatch):
+    """The saved NetBox token must never be sent to a URL that isn't the saved one."""
+    login(client)
+    store.update_field(
+        lambda c: (
+            setattr(c.netbox, "url", "https://netbox.mine:8000"),
+            setattr(c.netbox, "token", "SAVEDNBTOKEN"),
+        )
+    )
+
+    captured = {}
+
+    class FakeApi:
+        def __init__(self, url, token=None):
+            captured["url"] = url
+            captured["token"] = token
+            self.http_session = type("S", (), {"verify": True})()
+
+        def status(self):
+            return {"netbox-version": "4.3.6"}
+
+    import pynetbox
+
+    monkeypatch.setattr(pynetbox, "api", FakeApi)
+
+    # blank token + a FOREIGN url -> saved token must NOT be forwarded
+    resp = client.post(
+        "/test/netbox", data={"netbox_url": "https://attacker.evil:8000", "netbox_token": ""}
+    )
+    assert "SAVEDNBTOKEN" not in captured.get("token", "") if captured else True
+    assert "different NetBox URL" in resp.text  # refused, no request made
+    assert captured == {}  # FakeApi was never constructed
+
+    # blank token + the SAVED url -> saved token IS used (same origin)
+    resp = client.post(
+        "/test/netbox", data={"netbox_url": "https://netbox.mine:8000", "netbox_token": ""}
+    )
+    assert captured["url"] == "https://netbox.mine:8000"
+    assert captured["token"] == "SAVEDNBTOKEN"
+
+
 def test_same_origin_helper():
     assert _same_origin("https://nb.test:8000", "https://nb.test:8000/api") is True
     assert _same_origin("https://nb.test", "https://nb.test:443") is False  # explicit vs implicit

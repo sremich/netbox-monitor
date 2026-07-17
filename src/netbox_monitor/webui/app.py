@@ -363,13 +363,22 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
         form = await request.form()
         url = str(form.get("netbox_url") or "").strip().rstrip("/")
         token = str(form.get("netbox_token") or "").strip()
-        if not token and _same_origin(url, store.get().netbox.url):
-            # only forward the saved token to the URL it belongs to (anti-SSRF/exfil)
-            token = store.get().netbox.token
+        if not token:
+            if _same_origin(url, store.get().netbox.url):
+                # only forward the saved token to the URL it belongs to (anti-SSRF/exfil)
+                token = store.get().netbox.token
+            else:
+                return _test_fragment(False, "enter a token to test a different NetBox URL")
         verify = form.get("netbox_verify_ssl") == "on"
 
         def check():
-            api = _netbox_api(url, token, verify)
+            import pynetbox
+
+            # build directly with the resolved token — never fall back to the saved
+            # token for a foreign URL (that fallback lives only in _netbox_api, used
+            # by the same-origin pickers)
+            api = pynetbox.api(url, token=token)
+            api.http_session.verify = verify
             return str(api.status().get("netbox-version"))
 
         try:
