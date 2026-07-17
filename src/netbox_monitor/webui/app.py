@@ -8,6 +8,7 @@ import html
 import re
 import secrets
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -17,6 +18,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from markupsafe import Markup
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from netbox_monitor import __version__, config_transfer
@@ -70,20 +72,30 @@ MODULE_LABELS = {
 }
 
 
+def format_timestamp(value: float | None) -> Any:
+    """Render a stored epoch as a ``<time>`` element the browser localizes.
+
+    The server runs in its own timezone (UTC in Docker), so formatting here would
+    show every viewer the server's clock — a UK user in summer reads a just-now sync
+    as an hour old. Instead we emit the epoch as ``data-ts`` plus a UTC fallback;
+    a small script (base.html) rewrites it to the viewer's local time and a relative
+    age. Without JS the fallback is still correct and explicitly labelled UTC.
+    """
+    if not value:
+        return "never"
+    dt = datetime.fromtimestamp(value, tz=UTC)
+    fallback = dt.strftime("%H:%M:%S UTC")
+    iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return Markup(f'<time data-ts="{int(value)}" datetime="{iso}">{fallback}</time>')
+
+
 def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegistry) -> FastAPI:
     app = FastAPI(title="netbox-monitor", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
     templates = Jinja2Templates(directory=BASE_DIR / "templates")
     started = time.monotonic()
 
-    def _timestamp(value: float | None) -> str:
-        if not value:
-            return "never"
-        from datetime import datetime
-
-        return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
-
-    templates.env.filters["timestamp"] = _timestamp
+    templates.env.filters["timestamp"] = format_timestamp
     # globals, not render() context: these are constants, and a template rendered
     # outside render() would otherwise lose its footer silently
     templates.env.globals["version"] = __version__

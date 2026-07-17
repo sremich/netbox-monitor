@@ -524,3 +524,44 @@ def test_import_never_changes_the_login(client, store):
     after = store.get().webui
     assert after.password_hash == before.password_hash
     assert after.session_secret == before.session_secret
+
+
+# ------------------------------------------------- dashboard timestamps (tz)
+
+
+def test_format_timestamp_emits_browser_localizable_element():
+    from netbox_monitor.webui.app import format_timestamp
+
+    out = str(format_timestamp(1784302442))
+    # the epoch travels to the browser, which renders it in the viewer's tz
+    assert 'data-ts="1784302442"' in out
+    assert "<time" in out and 'datetime="2026-07-17T' in out and out.rstrip().endswith("</time>")
+    # the no-JS fallback is explicit UTC, never an unlabelled server-local time
+    assert "UTC" in out
+
+
+def test_format_timestamp_handles_never():
+    from netbox_monitor.webui.app import format_timestamp
+
+    assert format_timestamp(None) == "never"
+    assert format_timestamp(0) == "never"
+
+
+def test_dashboard_renders_timestamps_for_the_browser_not_the_server(store):
+    """A sync's time must reach the browser as an epoch, so the viewer sees it in
+    their own timezone — not the server's (UTC in Docker looks an hour off in BST)."""
+
+    class SeededStatus:
+        async def snapshot(self):
+            return {
+                "dhcp": {"_run": {"ts": 1784302442, "ok": True, "message": "ok", "duration": 1.2}}
+            }
+
+    client = TestClient(
+        create_app(store, engine=None, status=SeededStatus()), follow_redirects=False
+    )
+    login(client)
+    body = client.get("/").text
+    assert 'data-ts="1784302442"' in body
+    # the old bug: a bare server-local strftime with no timezone context
+    assert "2026-07-17 15:34" not in body

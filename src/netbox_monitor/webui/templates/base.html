@@ -41,5 +41,35 @@
       GitHub
     </a>
   </footer>
+  <script>
+    // Render every server-emitted <time data-ts> in the VIEWER's timezone with a
+    // relative age. The server clock (UTC in Docker) is not the user's clock, so a
+    // fresh sync would otherwise look hours stale. Pure client-side, refreshed in
+    // place so the "x ago" stays honest without reloading.
+    (function () {
+      function ago(seconds) {
+        var s = Math.max(0, Math.round(seconds));
+        if (s < 45) return "just now";
+        var m = Math.round(s / 60);
+        if (m < 60) return m + "m ago";
+        var h = Math.round(m / 60);
+        if (h < 24) return h + "h ago";
+        return Math.round(h / 24) + "d ago";
+      }
+      function paint() {
+        var now = Date.now() / 1000;
+        document.querySelectorAll("time[data-ts]").forEach(function (el) {
+          var ts = parseInt(el.getAttribute("data-ts"), 10);
+          if (!ts) return;
+          var d = new Date(ts * 1000);
+          el.textContent = d.toLocaleTimeString() + " (" + ago(now - ts) + ")";
+          el.title = d.toLocaleString();
+        });
+      }
+      paint();
+      setInterval(paint, 30000);
+      document.body.addEventListener("htmx:afterSwap", paint);
+    })();
+  </script>
 </body>
 </html>
