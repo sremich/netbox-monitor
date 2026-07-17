@@ -1,0 +1,123 @@
+{
+  "netbox": {
+    "url": "https://netbox.example",
+    "token": "v221-netbox-token",
+    "default_site": "Home",
+    "verify_ssl": false
+  },
+  "sites": [
+    {
+      "id": "uk",
+      "name": "UK",
+      "netbox_site": "uk",
+      "netbox_site_name": "UK",
+      "technitium": {
+        "url": "http://10.0.0.2:5380",
+        "token": "v221-technitium-token"
+      },
+      "proxmox": [
+        {
+          "host": "10.0.0.91",
+          "port": 8006,
+          "user": "monitor@pve",
+          "token_name": "nbm",
+          "token_value": "v221-proxmox-token",
+          "verify_ssl": false,
+          "cluster_name": null
+        }
+      ],
+      "discovery": {
+        "enabled": true,
+        "include_prefixes": [
+          "10.0.0.0/24"
+        ],
+        "exclude_prefixes": []
+      },
+      "lldp": {
+        "enabled": true,
+        "snmp_community": "v221-site-community",
+        "ssh_username": "admin",
+        "ssh_password": "v221-site-ssh-password"
+      },
+      "dhcp_enabled": true,
+      "dns_enabled": true,
+      "proxmox_enabled": true
+    }
+  ],
+  "dns": {
+    "enabled": true,
+    "interval": 300,
+    "zones_exclude": []
+  },
+  "dhcp": {
+    "enabled": true,
+    "interval": 60
+  },
+  "discovery": {
+    "enabled": true,
+    "interval": 900,
+    "ping_timeout": 1.0,
+    "concurrency": 128,
+    "max_hosts_per_prefix": 4096
+  },
+  "availability": {
+    "enabled": true,
+    "interval": 60,
+    "stale_after": 600,
+    "ping_timeout": 1.0,
+    "concurrency": 128
+  },
+  "lldp": {
+    "enabled": false,
+    "interval": 1800,
+    "source_tag": "lldp-source",
+    "platform_drivers": {},
+    "secrets_private_key": null,
+    "fallback_creds": {},
+    "crawl_enabled": true,
+    "max_switches": 100,
+    "max_depth": 8,
+    "max_auth_attempts": 4,
+    "credentials": [
+      {
+        "name": "mikrotik",
+        "driver": "mikrotik",
+        "username": "admin",
+        "password": "v221-cred-password",
+        "snmp_community": "v221-cred-community"
+      }
+    ],
+    "exclude_hosts": [
+      "10.0.0.1"
+    ]
+  },
+  "certs": {
+    "enabled": true,
+    "interval": 86400,
+    "ports": [
+      443,
+      8443
+    ],
+    "expiring_days": 30,
+    "timeout": 5.0,
+    "concurrency": 32
+  },
+  "proxmox_sync": {
+    "enabled": true,
+    "interval": 300
+  },
+  "lifecycle": {
+    "delete_dhcp_on_expiry": true,
+    "stale_grace_delete_days": null
+  },
+  "webui": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8899,
+    "password_hash": "pbkdf2$300000$aabb$ccdd",
+    "session_secret": "v221-session-secret"
+  },
+  "dry_run": false,
+  "data_dir": "data",
+  "log_level": "INFO"
+}

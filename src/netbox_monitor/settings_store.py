@@ -113,15 +113,19 @@ class SettingsStore:
             # would otherwise stay world-readable until the next save
             _restrict(path)
             raw = json.loads(path.read_text(encoding="utf-8"))
+            stamped = raw.get("schema_version") is not None
             found = _detect_schema(raw)
             config = config_from_raw(raw)  # migrates; raises if written by a newer build
             log.info("settings loaded", path=str(path), sites=[s.id for s in config.sites])
             store = cls(path, config)
-            if found != CONFIG_SCHEMA_VERSION:
-                # upgrade the file in place so this runs once, not every boot
-                log.info(
-                    "migrated settings to current schema", was=found, now=CONFIG_SCHEMA_VERSION
-                )
+            if found != CONFIG_SCHEMA_VERSION or not stamped:
+                # Rewrite when we migrated, and also when the file predates
+                # schema_version: that stamps the version we inferred, so later boots
+                # read it instead of re-deriving it from the config's shape.
+                if found != CONFIG_SCHEMA_VERSION:
+                    log.info(
+                        "migrated settings to current schema", was=found, now=CONFIG_SCHEMA_VERSION
+                    )
                 store._persist()
         elif (restored := _restore_from_env()) is not None:
             store = cls(path, restored)

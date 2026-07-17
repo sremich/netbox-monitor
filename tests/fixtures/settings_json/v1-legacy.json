@@ -1,0 +1,30 @@
+{
+  "netbox": {
+    "url": "http://netbox.example:8000",
+    "token": "v1-netbox-token",
+    "verify_ssl": false,
+    "default_site": "Home"
+  },
+  "technitium": {
+    "url": "http://10.0.0.2:5380",
+    "token": "v1-technitium-token"
+  },
+  "proxmox": [
+    {
+      "host": "10.0.0.91",
+      "user": "monitor@pve",
+      "token_name": "nbm",
+      "token_value": "v1-proxmox-token",
+      "verify_ssl": false
+    }
+  ],
+  "discovery": {
+    "enabled": true,
+    "interval": 900,
+    "include_prefixes": ["10.0.0.0/24"],
+    "exclude_prefixes": ["10.0.9.0/24"]
+  },
+  "dhcp": { "enabled": true, "interval": 60 },
+  "dry_run": false,
+  "log_level": "INFO"
+}

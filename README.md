@@ -30,6 +30,10 @@ v2 ships a built-in web UI at **http://\<host\>:8899**:
   instance**, **Proxmox instances**, and **discovery scanning scope** (prefix pickers
   populated live from NetBox). Every section has a Test button.
 - **Dashboard**: per-module / per-site last-run status and **Run now** buttons.
+- **Backup**: export/import the whole configuration, encrypted or redacted (see
+  [Backup & restore](#backup--restore--moving-to-another-host)).
+- **`/healthz`**: unauthenticated liveness JSON (version, schema, whether it's
+  configured, uptime — no URLs or credentials) for container healthchecks.
 
 Configuration edits apply immediately — the sync engine hot-reloads without a restart.
 The live config persists in `data/settings.json` (keep the data volume!); `config.yaml`
@@ -196,6 +200,49 @@ Two things to know when **moving everything to a different NetBox site**:
   multi-site setup, scope your prefixes to each NetBox Site (or set per-site
   include-prefixes); the dashboard flags a site that has nothing to scan.
 
+## Backup & restore / moving to another host
+
+The **Backup** page exports this instance's whole configuration — sites, NetBox /
+Technitium / Proxmox tokens, switch credentials, module settings — as a single JSON
+file, and imports it back. Two modes:
+
+- **Encrypted** (passphrase) — contains every credential. This is the one to use for
+  a real backup or to move a setup to another host.
+- **Redacted** (no passphrase) — every secret replaced by `__REDACTED__`. Safe to
+  diff, keep in git, or attach to a bug report. Importing it **keeps the secrets the
+  target already has** rather than blanking them; anything it can't match is left
+  empty and reported.
+
+> ⚠️ An encrypted export contains every token and password the instance holds. The
+> passphrase is the only thing protecting it, and **there is no recovery if you lose
+> it** — the file is useless without it.
+
+Your **web UI password is never exported**. Importing therefore can't lock you out or
+change how you log in, and a leaked export can't be used to forge sessions against the
+instance it came from. On import the previous config is saved to `settings.json.bak`,
+and the sync engine picks up the new one within a couple of seconds — no restart.
+
+**Restore on first boot** (a fresh container comes up fully configured, no clicking):
+
+```yaml
+    volumes:
+      - ./netbox-monitor-config.json:/app/restore.json:ro
+    environment:
+      - NBM_RESTORE_FILE=/app/restore.json
+      - NBM_RESTORE_PASSPHRASE_FILE=/run/secrets/nbm_restore_pw  # keeps it out of `docker inspect`
+```
+
+Only used when `data/settings.json` doesn't exist, so it never clobbers a live config.
+A wrong passphrase logs an error and starts unconfigured rather than crash-looping —
+delete `data/settings.json` and restart to retry, or set `NBM_RESTORE_STRICT=1` to fail
+hard instead. Since the export carries no password, `WEBUI_PASSWORD` / the setup page
+still apply.
+
+**Upgrades are safe:** every config records the schema it was written at, and older
+ones are migrated on load. Each release is tested against real configs and exports from
+previous releases, so an old backup keeps working. A config written by a *newer*
+version is refused rather than silently downgraded.
+
 ## NetBox objects it maintains
 
 - Tags: `managed:netbox-monitor`, `src:*`, `stale`, `cert-expiring`, `cert-expired`
@@ -209,6 +256,14 @@ Two things to know when **moving everything to a different NetBox site**:
 pip install -e ".[dev]"
 ruff check . && pytest
 ```
+
+### Releasing
+
+The version lives in **one** place: `src/netbox_monitor/__init__.py` (pyproject reads
+it via hatchling). Bump it, add the config-export golden fixture for the new version
+(`pytest` tells you if it's missing, and how to generate it), then tag `vX.Y.Z` — CI
+refuses to publish an image whose tag disagrees with the code. See `CLAUDE.md` for the
+config-compatibility rules that keep old backups importable.
 
 ## Backlog / future ideas
 

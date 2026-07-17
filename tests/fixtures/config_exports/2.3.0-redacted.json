@@ -1,0 +1,125 @@
+{
+  "format": "netbox-monitor-config",
+  "format_version": 1,
+  "app_version": "2.3.0",
+  "config_schema": 2,
+  "encrypted": false,
+  "created_at": "2026-07-17T14:41:12Z",
+  "config": {
+    "schema_version": 2,
+    "netbox": {
+      "url": "https://netbox.example",
+      "token": "__REDACTED__",
+      "default_site": "Home",
+      "verify_ssl": false
+    },
+    "sites": [
+      {
+        "id": "uk",
+        "name": "UK",
+        "netbox_site": "uk",
+        "netbox_site_name": "UK",
+        "technitium": {
+          "url": "http://10.0.0.2:5380",
+          "token": "__REDACTED__"
+        },
+        "proxmox": [
+          {
+            "host": "10.0.0.91",
+            "port": 8006,
+            "user": "monitor@pve",
+            "token_name": "nbm",
+            "token_value": "__REDACTED__",
+            "verify_ssl": false,
+            "cluster_name": null
+          }
+        ],
+        "discovery": {
+          "enabled": true,
+          "include_prefixes": [
+            "10.0.0.0/24"
+          ],
+          "exclude_prefixes": []
+        },
+        "lldp": {
+          "enabled": true,
+          "snmp_community": "__REDACTED__",
+          "ssh_username": "admin",
+          "ssh_password": "__REDACTED__"
+        },
+        "dhcp_enabled": true,
+        "dns_enabled": true,
+        "proxmox_enabled": true
+      }
+    ],
+    "dns": {
+      "enabled": true,
+      "interval": 300,
+      "zones_exclude": []
+    },
+    "dhcp": {
+      "enabled": true,
+      "interval": 60
+    },
+    "discovery": {
+      "enabled": true,
+      "interval": 900,
+      "ping_timeout": 1.0,
+      "concurrency": 128,
+      "max_hosts_per_prefix": 4096
+    },
+    "availability": {
+      "enabled": true,
+      "interval": 60,
+      "stale_after": 600,
+      "ping_timeout": 1.0,
+      "concurrency": 128
+    },
+    "lldp": {
+      "enabled": false,
+      "interval": 1800,
+      "source_tag": "lldp-source",
+      "platform_drivers": {},
+      "secrets_private_key": null,
+      "fallback_creds": {},
+      "crawl_enabled": true,
+      "max_switches": 100,
+      "max_depth": 8,
+      "max_auth_attempts": 4,
+      "credentials": [
+        {
+          "name": "mikrotik",
+          "driver": "mikrotik",
+          "username": "admin",
+          "password": "__REDACTED__",
+          "snmp_community": "__REDACTED__"
+        }
+      ],
+      "exclude_hosts": [
+        "10.0.0.1"
+      ]
+    },
+    "certs": {
+      "enabled": true,
+      "interval": 86400,
+      "ports": [
+        443,
+        8443
+      ],
+      "expiring_days": 30,
+      "timeout": 5.0,
+      "concurrency": 32
+    },
+    "proxmox_sync": {
+      "enabled": true,
+      "interval": 300
+    },
+    "lifecycle": {
+      "delete_dhcp_on_expiry": true,
+      "stale_grace_delete_days": null
+    },
+    "dry_run": false,
+    "data_dir": "data",
+    "log_level": "INFO"
+  }
+}
