@@ -16,7 +16,13 @@ from pathlib import Path
 
 import structlog
 
-from netbox_monitor.config import AppConfig, load_config
+from netbox_monitor.config import (
+    CONFIG_SCHEMA_VERSION,
+    AppConfig,
+    _detect_schema,
+    config_from_raw,
+    load_config,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -35,9 +41,17 @@ class SettingsStore:
         data_dir = Path(data_dir)
         path = data_dir / "settings.json"
         if path.exists():
-            config = AppConfig.model_validate(json.loads(path.read_text(encoding="utf-8")))
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            found = _detect_schema(raw)
+            config = config_from_raw(raw)  # migrates; raises if written by a newer build
             log.info("settings loaded", path=str(path), sites=[s.id for s in config.sites])
             store = cls(path, config)
+            if found != CONFIG_SCHEMA_VERSION:
+                # upgrade the file in place so this runs once, not every boot
+                log.info(
+                    "migrated settings to current schema", was=found, now=CONFIG_SCHEMA_VERSION
+                )
+                store._persist()
         elif config_yaml and Path(config_yaml).exists():
             config = load_config(config_yaml)
             log.info(

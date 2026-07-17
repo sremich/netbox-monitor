@@ -7,12 +7,20 @@ Legacy (v1) flat YAML configs — top-level ``technitium`` / ``proxmox`` /
 ``discovery`` and ``netbox.default_site`` — are migrated into a single site by
 ``migrate_legacy``. YAML values support ``${ENV_VAR}`` / ``${ENV_VAR:-default}``
 interpolation; the runtime settings.json (see settings_store.py) is literal.
+
+**Schema versioning.** Every serialized config carries ``schema_version``.
+``config_from_raw`` is the only sanctioned path from a serialized dict to an
+``AppConfig``: it detects the schema, runs the ``MIGRATIONS`` chain up to
+``CONFIG_SCHEMA_VERSION``, then validates. Changing the serialized shape means
+bumping ``CONFIG_SCHEMA_VERSION`` and adding a migration keyed by the version it
+migrates *from* — see CLAUDE.md, which makes the compatibility promise explicit.
 """
 
 from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import yaml
@@ -20,6 +28,25 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 _ENV_RE = re.compile(r"\$\{(?P<name>[A-Za-z0-9_]+)(?::-(?P<default>[^}]*))?\}")
+
+#: Serialized-config schema. 1 = the v1 flat layout; 2 = the current sites layout.
+CONFIG_SCHEMA_VERSION = 2
+
+
+class ConfigSchemaTooNewError(RuntimeError):
+    """A config was written by a newer build than this one."""
+
+    def __init__(self, found: int, supported: int):
+        super().__init__(
+            f"config schema {found} is newer than this build supports ({supported}) — "
+            "upgrade netbox-monitor, or restore the settings.json.bak from before the upgrade"
+        )
+        self.found = found
+        self.supported = supported
+
+
+class ConfigMigrationError(RuntimeError):
+    """A config could not be migrated up to the current schema."""
 
 
 def _interpolate(value: object) -> object:
@@ -195,6 +222,7 @@ class WebUIConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
+    schema_version: int = CONFIG_SCHEMA_VERSION
     netbox: NetBoxConfig = Field(default_factory=NetBoxConfig)
     sites: list[SiteConfig] = Field(default_factory=list)
     dns: DnsSyncConfig = Field(default_factory=DnsSyncConfig)
@@ -254,13 +282,59 @@ def migrate_legacy(raw: dict) -> dict:
     return raw
 
 
+#: Migrations keyed by the schema version they migrate *from*. Append-only:
+#: removing a step breaks every config still written at that version.
+MIGRATIONS: dict[int, Callable[[dict], dict]] = {1: migrate_legacy}
+
+
+def _detect_schema(raw: dict) -> int:
+    """Schema of a *serialized* config dict.
+
+    Runs before validation, so a config predating ``schema_version`` is sniffed
+    structurally rather than defaulting to the current version (which would skip
+    its migration and silently drop data).
+    """
+    version = raw.get("schema_version")
+    if version is not None:
+        try:
+            return int(version)
+        except (TypeError, ValueError):
+            raise ConfigMigrationError(f"invalid schema_version: {version!r}") from None
+    return 2 if "sites" in raw else 1
+
+
+def migrate_to_current(raw: dict) -> dict:
+    """Apply every migration from the detected schema up to the current one."""
+    version = _detect_schema(raw)
+    if version > CONFIG_SCHEMA_VERSION:
+        raise ConfigSchemaTooNewError(version, CONFIG_SCHEMA_VERSION)
+    if version < 1:
+        raise ConfigMigrationError(f"invalid schema version {version}")
+    while version < CONFIG_SCHEMA_VERSION:
+        step = MIGRATIONS.get(version)
+        if step is None:
+            raise ConfigMigrationError(f"no migration from config schema {version}")
+        raw = step(raw)
+        version += 1
+    raw["schema_version"] = CONFIG_SCHEMA_VERSION
+    return raw
+
+
+def config_from_raw(raw: dict) -> AppConfig:
+    """Migrate a serialized config up to the current schema, then validate.
+
+    The only sanctioned path from serialized input to ``AppConfig`` — validating
+    a raw dict directly skips migration.
+    """
+    return AppConfig.model_validate(migrate_to_current(raw))
+
+
 def load_config(path: str | Path) -> AppConfig:
-    """Load YAML config with ${ENV_VAR} interpolation and v1->v2 migration.
+    """Load YAML config with ${ENV_VAR} interpolation and schema migration.
 
     Secrets are read from a ``.env`` sitting next to the config file (if any).
     """
     path = Path(path)
     load_dotenv(path.resolve().parent / ".env")
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    raw = migrate_legacy(_interpolate(raw))
-    return AppConfig.model_validate(raw)
+    return config_from_raw(_interpolate(raw))

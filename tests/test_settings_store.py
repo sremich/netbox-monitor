@@ -1,6 +1,14 @@
 import json
 
-from netbox_monitor.config import AppConfig, NetBoxConfig, SiteConfig
+import pytest
+
+from netbox_monitor.config import (
+    CONFIG_SCHEMA_VERSION,
+    AppConfig,
+    ConfigSchemaTooNewError,
+    NetBoxConfig,
+    SiteConfig,
+)
 from netbox_monitor.settings_store import SettingsStore
 
 
@@ -55,3 +63,33 @@ def test_get_returns_copy(tmp_path):
     config = store.get()
     config.netbox.url = "http://mutated"
     assert store.get().netbox.url != "http://mutated"
+
+
+def test_bootstrap_migrates_a_legacy_settings_json(tmp_path):
+    """A v1-shaped settings.json used to validate straight through into sites=[],
+    silently no-opping every module. It must be migrated on load."""
+    (tmp_path / "settings.json").write_text(
+        json.dumps(
+            {
+                "netbox": {"url": "http://nb", "token": "t", "default_site": "Home"},
+                "technitium": {"url": "http://dns", "token": "sekrit"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = SettingsStore.bootstrap(tmp_path, None)
+    config = store.get()
+    assert [s.id for s in config.sites] == ["home"]
+    assert config.sites[0].technitium.token == "sekrit"
+    # and the file is upgraded in place, so the migration runs once not every boot
+    on_disk = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert on_disk["schema_version"] == CONFIG_SCHEMA_VERSION
+    assert on_disk["sites"][0]["id"] == "home"
+
+
+def test_bootstrap_refuses_a_settings_json_from_a_newer_build(tmp_path):
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"schema_version": CONFIG_SCHEMA_VERSION + 1, "sites": []}), encoding="utf-8"
+    )
+    with pytest.raises(ConfigSchemaTooNewError):
+        SettingsStore.bootstrap(tmp_path, None)
