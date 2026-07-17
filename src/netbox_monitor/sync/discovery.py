@@ -43,12 +43,12 @@ class DiscoverySync:
         for site in sites:
             started = time.monotonic()
             try:
-                found = await self._scan_site(site)
+                found, note = await self._scan_site(site)
                 await self.ctx.status.record(
                     self.name,
                     site.config.id,
                     True,
-                    f"{found} hosts alive",
+                    note or f"{found} hosts alive",
                     time.monotonic() - started,
                 )
             except Exception as exc:
@@ -57,11 +57,20 @@ class DiscoverySync:
                     self.name, site.config.id, False, str(exc), time.monotonic() - started
                 )
 
-    async def _scan_site(self, site: ResolvedSite) -> int:
-        targets = await self._build_targets(site)
+    async def _scan_site(self, site: ResolvedSite) -> tuple[int, str | None]:
+        prefixes = await self._site_prefixes(site)
+        targets = await self._build_targets(site, prefixes)
         if not targets:
-            log.info("no discovery targets for site", site=site.config.id)
-            return 0
+            if not prefixes:
+                slug = site.config.netbox_site or site.config.id
+                note = (
+                    f"no prefixes scoped to NetBox site '{slug}' — scope prefixes to the "
+                    f"site in NetBox, or set include-prefixes for this site"
+                )
+            else:
+                note = "no scannable hosts (all in DHCP scopes or excluded)"
+            log.info("no discovery targets for site", site=site.config.id, reason=note)
+            return 0, note
         cfg = self.ctx.config.discovery
         log.info("pinging targets", site=site.config.id, count=len(targets))
         results = await async_multiping(
@@ -77,7 +86,7 @@ class DiscoverySync:
             "discovery sweep done", site=site.config.id, alive=len(alive), scanned=len(targets)
         )
         if not alive:
-            return 0
+            return 0, None
 
         arp = await get_arp_table()
         for ip in alive:
@@ -102,7 +111,7 @@ class DiscoverySync:
                 log.exception("failed to document discovered host", ip=ip)
                 continue
             await self.ctx.state.record_check(f"ip:{ip}", up=True)
-        return len(alive)
+        return len(alive), None
 
     # ----------------------------------------------------------------- setup
 
@@ -148,8 +157,12 @@ class DiscoverySync:
 
         return await asyncio.to_thread(fetch)
 
-    async def _build_targets(self, site: ResolvedSite) -> list[str]:
+    async def _build_targets(
+        self, site: ResolvedSite, prefixes: list[str] | None = None
+    ) -> list[str]:
         cfg = self.ctx.config.discovery
+        if prefixes is None:
+            prefixes = await self._site_prefixes(site)
 
         dhcp_ranges: list[tuple[int, int]] = []
         if site.technitium is not None:
@@ -173,7 +186,6 @@ class DiscoverySync:
                     error=str(exc),
                 )
 
-        prefixes = await self._site_prefixes(site)
         # exclude entries may be whole prefixes OR sub-ranges of a scanned prefix;
         # keep only IPv4 excludes so a mixed-version compare can't raise
         exclude = [

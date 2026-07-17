@@ -75,14 +75,18 @@ class FakeEndpoint:
             except ValueError:
                 return False
         if key == "device_id":
-            device = getattr(record, "device", None)
+            device = getattr(record, "device", None) or getattr(
+                getattr(record, "assigned_object", None), "device", None
+            )
             return device == value or getattr(device, "id", None) == value
         if key == "site_id":
             site = getattr(record, "site", None)
             return site == value or getattr(site, "id", None) == value
         if key in ("cluster_id", "virtual_machine_id"):
             field = key.rsplit("_", 1)[0]
-            obj = getattr(record, field, None)
+            obj = getattr(record, field, None) or getattr(
+                getattr(record, "assigned_object", None), field, None
+            )
             return obj == value or getattr(obj, "id", None) == value
         if key == "name__ie":
             return str(getattr(record, "name", "")).lower() == str(value).lower()

@@ -136,6 +136,29 @@ def test_netbox_test_never_forwards_token_to_foreign_url(client, store, monkeypa
     assert captured["token"] == "SAVEDNBTOKEN"
 
 
+def test_cleanup_page_requires_auth(client):
+    assert client.get("/cleanup").status_code == 303  # redirect to login
+
+
+def test_cleanup_page_loads_when_authed(client, store):
+    login(client)
+    # netbox not configured -> page still renders (no managed objects)
+    resp = client.get("/cleanup")
+    assert resp.status_code == 200
+    assert "Cleanup" in resp.text
+
+
+def test_cleanup_delete_requires_confirm(client, store):
+    login(client)
+    store.update_field(
+        lambda c: (setattr(c.netbox, "url", "http://nb"), setattr(c.netbox, "token", "t"))
+    )
+    # without confirm=on, the delete is refused before touching anything
+    resp = client.post("/cleanup/delete", data={"site_slug": "home"})
+    assert resp.status_code == 200
+    assert "confirmation not checked" in resp.text
+
+
 def test_same_origin_helper():
     assert _same_origin("https://nb.test:8000", "https://nb.test:8000/api") is True
     assert _same_origin("https://nb.test", "https://nb.test:443") is False  # explicit vs implicit

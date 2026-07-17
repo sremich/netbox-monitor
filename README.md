@@ -162,12 +162,32 @@ router/firewall:
   description) only that one driver's login is tried, and there's a hard per-host cap
   (`max_auth_attempts`, default 4) so a device is never hit with a barrage of logins.
 
+## Cleanup / migrating sites
+
+The **Cleanup** page (top nav) inventories every object this service created — devices,
+VMs, IPs, cables, all tagged `managed:netbox-monitor` — grouped by site, source, and
+staleness. You can then bulk-delete a selection (by site, source, "only stale", or "not
+seen in N days"), with a **Preview (count only)** step and an explicit confirm before
+anything is removed. Human-created objects are never touched. Optionally tick *Re-run
+discovery afterwards* to recreate hosts fresh on the current site.
+
+Two things to know when **moving everything to a different NetBox site**:
+
+- The sync **auto-migrates** a device to the site that re-discovers it *when it's matched
+  by MAC* — so MAC-known hosts re-home themselves. Hosts discovered by ping only (no ARP
+  MAC) are matched by name and stay put; use Cleanup to remove them and let the next
+  discovery recreate them on the right site.
+- Discovery only scans prefixes **scoped to a site's NetBox Site** — unless you run a
+  **single** configured site, in which case it scans all active prefixes. So for a
+  multi-site setup, scope your prefixes to each NetBox Site (or set per-site
+  include-prefixes); the dashboard flags a site that has nothing to scan.
+
 ## NetBox objects it maintains
 
 - Tags: `managed:netbox-monitor`, `src:*`, `stale`, `cert-expiring`, `cert-expired`
 - Custom fields: `last_seen`, `discovered_mac`, `oui_vendor` (IP/device),
   `dhcp_scope` (prefix), `cert_expiry`/`cert_issuer`/`cert_cn` (device/VM)
-- Device roles: `Discovered`, `Hypervisor`
+- Device roles: `Discovered`, `Hypervisor`, `Switch`
 
 ## Development
 

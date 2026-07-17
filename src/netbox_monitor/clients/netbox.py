@@ -123,6 +123,20 @@ class NetBoxClient:
         log.info("deleted", obj=str(obj), source=source_slug)
         return ok
 
+    def delete_if_managed(self, obj: Any) -> bool:
+        """Cleanup-safe delete: removes the object only if it carries our managed
+        tag (any source). Never touches human-created objects. Honors dry_run."""
+        if MANAGED_TAG_SLUG not in self.obj_tag_slugs(obj):
+            log.warning("refusing to delete object not managed by us", obj=str(obj))
+            return False
+        if self.dry_run:
+            log.info("dry-run: would delete (cleanup)", obj=str(obj))
+            return False
+        with self.lock:
+            ok = obj.delete()
+        log.info("deleted (cleanup)", obj=str(obj))
+        return ok
+
     def add_tags(self, obj: Any, *slugs: str) -> bool:
         current = self.obj_tag_slugs(obj)
         missing = [s for s in slugs if s not in current]

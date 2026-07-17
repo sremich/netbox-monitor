@@ -253,15 +253,30 @@ def ensure_host_device(
 ) -> Any | None:
     """Create/update a discovered host: Device + interface (MAC) + primary IP."""
     device = None
+    matched_by_mac = False
     # prefer identifying an existing device by its interface MAC (survives renames)
     if mac:
         match = find_interface_by_mac(nb, mac)
         if match and match[0] == "dcim.interface" and match[2] is not None:
             with nb.lock:
                 device = nb.api.dcim.devices.get(match[2].id)
+            matched_by_mac = device is not None
     if device is None:
         with nb.lock:
             device = nb.api.dcim.devices.get(name=name)
+
+    # a managed device re-discovered at a different site (matched by its reliable
+    # MAC) is migrated to the current site — prevents devices being pinned to an
+    # old site config forever
+    if (
+        device is not None
+        and matched_by_mac
+        and site_id is not None
+        and nb.is_managed(device)
+        and getattr(getattr(device, "site", None), "id", None) != site_id
+    ):
+        log.info("migrating device to current site", device=str(device), site_id=site_id)
+        nb.update(device, {"site": site_id}, reason="migrate device to current site")
 
     if device is None:
         if site_id is None:

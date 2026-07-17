@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from netbox_monitor.clients.netbox import slugify
+from netbox_monitor.clients.netbox import NetBoxClient, slugify
 from netbox_monitor.config import (
     LifecycleConfig,
     LldpCredential,
@@ -30,6 +30,7 @@ from netbox_monitor.config import (
 from netbox_monitor.scheduler import Engine
 from netbox_monitor.settings_store import SettingsStore
 from netbox_monitor.status import StatusRegistry
+from netbox_monitor.sync import cleanup
 from netbox_monitor.webui.auth import (
     SESSION_COOKIE,
     check_session_token,
@@ -311,6 +312,87 @@ def create_app(store: SettingsStore, engine: Engine | None, status: StatusRegist
 
         store.update_field(apply)
         return RedirectResponse("/sites", status_code=303)
+
+    # --------------------------------------------------------------- cleanup
+
+    def _cleanup_filters(form: Any) -> dict:
+        types = form.getlist("object_types") or list(cleanup.OBJECT_TYPES)
+        nsd = str(form.get("not_seen_days") or "").strip()
+        return {
+            "object_types": tuple(t for t in types if t in cleanup.OBJECT_TYPES),
+            "site_slug": (str(form.get("site_slug") or "").strip() or None),
+            "source": (str(form.get("source") or "").strip() or None),
+            "only_stale": form.get("only_stale") == "on",
+            "not_seen_days": int(nsd) if nsd else None,
+        }
+
+    @app.get("/cleanup", response_class=HTMLResponse)
+    async def cleanup_page(request: Request):
+        if redirect := guard(request):
+            return redirect
+        cfg = store.get()
+        rows: list = []
+        error = None
+        if cfg.netbox.configured:
+            nb = NetBoxClient(cfg.netbox, dry_run=True)
+            try:
+                rows = await asyncio.to_thread(cleanup.inventory, nb)
+            except Exception as exc:
+                error = str(exc)
+        sites = sorted({r.site for r in rows if r.site not in ("—", "unassigned")})
+        sources = sorted({r.source for r in rows if r.source != "?"})
+        return render(
+            request,
+            "cleanup.html",
+            rows=rows,
+            sites=sites,
+            sources=sources,
+            object_types=cleanup.OBJECT_TYPES,
+            error=error,
+            dry_run=cfg.dry_run,
+        )
+
+    @app.post("/cleanup/preview", response_class=HTMLResponse)
+    async def cleanup_preview(request: Request):
+        if not authed(request):
+            return HTMLResponse("not authenticated", status_code=401)
+        cfg = store.get()
+        if not cfg.netbox.configured:
+            return HTMLResponse('<span class="error">NetBox not configured</span>')
+        filters = _cleanup_filters(await request.form())
+        nb = NetBoxClient(cfg.netbox, dry_run=True)
+        result = await asyncio.to_thread(
+            lambda: cleanup.delete_managed(nb, dry_run=True, **filters)
+        )
+        detail = ", ".join(f"{n} {t}" for t, n in result.counts.items()) or "nothing"
+        return HTMLResponse(
+            f'<span class="flash"><strong>{result.total}</strong> objects would be '
+            f"deleted ({html.escape(detail)}).</span>"
+        )
+
+    @app.post("/cleanup/delete", response_class=HTMLResponse)
+    async def cleanup_delete(request: Request):
+        if not authed(request):
+            return HTMLResponse("not authenticated", status_code=401)
+        form = await request.form()
+        if form.get("confirm") != "on":
+            return HTMLResponse('<span class="error">confirmation not checked</span>')
+        cfg = store.get()
+        if not cfg.netbox.configured:
+            return HTMLResponse('<span class="error">NetBox not configured</span>')
+        filters = _cleanup_filters(form)
+        nb = NetBoxClient(cfg.netbox, dry_run=cfg.dry_run)
+        result = await asyncio.to_thread(lambda: cleanup.delete_managed(nb, **filters))
+        detail = ", ".join(f"{n} {t}" for t, n in result.counts.items()) or "nothing"
+        verb = "would delete" if result.dry_run else "deleted"
+        rerun = ""
+        if not result.dry_run and form.get("rerun_discovery") == "on" and engine:
+            engine.run_now("discovery")
+            rerun = " — discovery re-run triggered"
+        return HTMLResponse(
+            f'<span class="okbox">{verb} <strong>{result.total}</strong> objects '
+            f"({html.escape(detail)}){rerun}.</span>"
+        )
 
     # ------------------------------------------------------- NetBox pickers
 

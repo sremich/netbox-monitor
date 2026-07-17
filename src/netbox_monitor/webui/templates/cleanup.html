@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Cleanup — netbox-monitor{% endblock %}
+{% block content %}
+<h2>Cleanup</h2>
+<p>Everything this service created is tagged <code>managed:netbox-monitor</code>. Use this
+page to remove objects left by a previous configuration (e.g. devices pinned to an old
+site) and let the next sync recreate them on the right site. <strong>Human-created objects
+are never touched.</strong></p>
+
+{% if error %}<article class="warn">{{ error }}</article>{% endif %}
+{% if dry_run %}<article class="warn">Global dry-run is ON — deletes are simulated only.</article>{% endif %}
+
+<h3>Managed objects in NetBox</h3>
+{% if rows %}
+<table>
+  <thead><tr><th>Type</th><th>Site</th><th>Source</th><th>Count</th><th>Stale</th><th>Not seen 30d+</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{{ r.object_type }}</td><td>{{ r.site }}</td><td>{{ r.source }}</td>
+      <td>{{ r.count }}</td>
+      <td>{{ r.stale or '' }}</td><td>{{ r.not_seen_30d or '' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No managed objects found{% if not error %} (or NetBox isn't configured yet){% endif %}.</p>
+{% endif %}
+
+<h3>Delete managed objects</h3>
+<form id="cleanup-form">
+  <div class="grid">
+    <label>Site
+      <select name="site_slug">
+        <option value="">any site</option>
+        {% for s in sites %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Source
+      <select name="source">
+        <option value="">any source</option>
+        {% for s in sources %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Not seen in ≥ N days <small>(blank = any)</small>
+      <input type="number" name="not_seen_days" min="1" placeholder="e.g. 30">
+    </label>
+  </div>
+  <fieldset>
+    <legend>Object types</legend>
+    {% for t in object_types %}
+    <label><input type="checkbox" name="object_types" value="{{ t }}" checked> {{ t }}</label>
+    {% endfor %}
+  </fieldset>
+  <label><input type="checkbox" name="only_stale"> Only stale objects</label>
+
+  <button type="button" class="outline" hx-post="/cleanup/preview"
+          hx-include="#cleanup-form" hx-target="#cleanup-out" hx-swap="innerHTML">
+    Preview (count only)</button>
+  <span id="cleanup-out"></span>
+
+  <hr>
+  <label><input type="checkbox" name="confirm"> I understand this permanently deletes the
+    selected managed objects from NetBox</label>
+  <label><input type="checkbox" name="rerun_discovery"> Re-run discovery afterwards
+    (recreate hosts on the current site)</label>
+  <button type="button" class="danger" hx-post="/cleanup/delete"
+          hx-include="#cleanup-form" hx-target="#cleanup-result" hx-swap="innerHTML"
+          hx-confirm="Delete the selected managed objects from NetBox?">
+    Delete</button>
+  <span id="cleanup-result"></span>
+</form>
+{% endblock %}
