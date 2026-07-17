@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -93,3 +94,33 @@ def test_bootstrap_refuses_a_settings_json_from_a_newer_build(tmp_path):
     )
     with pytest.raises(ConfigSchemaTooNewError):
         SettingsStore.bootstrap(tmp_path, None)
+
+
+def test_replace_with_backup_writes_bak(tmp_path):
+    store = make_store(tmp_path)
+    store.replace(AppConfig(netbox=NetBoxConfig(url="http://before", token="t")))
+
+    backup_path = store.replace(
+        AppConfig(netbox=NetBoxConfig(url="http://after", token="t")), backup=True
+    )
+
+    assert backup_path == tmp_path / "settings.json.bak"
+    assert store.get().netbox.url == "http://after"
+    # the .bak holds the config as it was *before* this replace
+    saved = json.loads(backup_path.read_text(encoding="utf-8"))
+    assert saved["netbox"]["url"] == "http://before"
+
+
+def test_replace_without_backup_writes_no_bak(tmp_path):
+    store = make_store(tmp_path)
+    store.replace(AppConfig(netbox=NetBoxConfig(url="http://x", token="t")))
+    assert not (tmp_path / "settings.json.bak").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows chmod only maps the read-only bit")
+def test_settings_file_is_not_world_readable(tmp_path):
+    """settings.json holds plaintext API tokens."""
+    store = make_store(tmp_path)
+    store.replace(AppConfig(netbox=NetBoxConfig(url="http://nb", token="sekrit")), backup=True)
+    assert (tmp_path / "settings.json").stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "settings.json.bak").stat().st_mode & 0o777 == 0o600
