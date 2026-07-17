@@ -1,4 +1,5 @@
-"""Test fixtures: an in-memory fake of the pynetbox API surface we use."""
+"""Test fixtures: an in-memory fake of the pynetbox API surface we use, plus the
+shared web-UI fixtures (``store``/``client``/``login``)."""
 
 from __future__ import annotations
 
@@ -7,10 +8,14 @@ import itertools
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 
 from netbox_monitor.clients.netbox import ALL_TAGS, NetBoxClient
 from netbox_monitor.config import AppConfig, NetBoxConfig, SiteConfig
 from netbox_monitor.context import ResolvedSite
+from netbox_monitor.settings_store import SettingsStore
+from netbox_monitor.webui.app import create_app
+from netbox_monitor.webui.auth import hash_password
 
 _ids = itertools.count(1)
 
@@ -205,3 +210,34 @@ def ctx(nb, app_config):
         status=FakeStatus(),
         sites=sites,
     )
+
+
+# ------------------------------------------------------------------ web UI
+
+WEBUI_PASSWORD = "hunter22"
+
+
+@pytest.fixture
+def store(tmp_path) -> SettingsStore:
+    store = SettingsStore.bootstrap(tmp_path, None)
+    store.update_field(lambda c: setattr(c.webui, "password_hash", hash_password(WEBUI_PASSWORD)))
+    return store
+
+
+@pytest.fixture
+def client(store) -> TestClient:
+    app = create_app(store, engine=None, status=FakeStatus())
+    return TestClient(app, follow_redirects=False)
+
+
+def login(client) -> None:
+    response = client.post("/login", data={"password": WEBUI_PASSWORD})
+    assert response.status_code == 303
+    client.cookies.update(response.cookies)
+
+
+def csrf_token(store) -> str:
+    """A CSRF token valid for the given store's session secret."""
+    from netbox_monitor.webui.auth import make_csrf_token
+
+    return make_csrf_token(store.get().webui.session_secret)

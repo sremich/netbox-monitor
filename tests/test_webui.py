@@ -1,35 +1,11 @@
 """Web UI: auth flow, settings edit (intervals), site CRUD, security guards."""
 
-import pytest
 from fastapi.testclient import TestClient
 
+from conftest import FakeStatus, login
 from netbox_monitor.settings_store import SettingsStore
 from netbox_monitor.webui.app import _same_origin, create_app
-from netbox_monitor.webui.auth import hash_password, verify_password
-
-
-class FakeStatus:
-    async def snapshot(self):
-        return {}
-
-
-@pytest.fixture
-def store(tmp_path):
-    store = SettingsStore.bootstrap(tmp_path, None)
-    store.update_field(lambda c: setattr(c.webui, "password_hash", hash_password("hunter22")))
-    return store
-
-
-@pytest.fixture
-def client(store):
-    app = create_app(store, engine=None, status=FakeStatus())
-    return TestClient(app, follow_redirects=False)
-
-
-def login(client):
-    response = client.post("/login", data={"password": "hunter22"})
-    assert response.status_code == 303
-    client.cookies.update(response.cookies)
+from netbox_monitor.webui.auth import verify_password
 
 
 def test_requires_login(client):
