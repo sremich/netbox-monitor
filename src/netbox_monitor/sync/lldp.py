@@ -609,7 +609,16 @@ class LldpSync:
                 other = nb.api.dcim.devices.get(other_id)
             if other is None or other.id == device.id:
                 continue
-            device = self._merge_duplicate(device, other, mac)
+            try:
+                device = self._merge_duplicate(device, other, mac)
+            except Exception as exc:
+                # a failed merge must not abort the crawl; the next run retries
+                log.warning(
+                    "merge of duplicate switch failed",
+                    a=device.name,
+                    b=other.name,
+                    error=str(exc)[:200],
+                )
             break
 
         self._record_local_macs(device, identity)
@@ -662,6 +671,15 @@ class LldpSync:
             matched_mac=mac,
         )
         lose_primary_id = getattr(getattr(lose, "primary_ip4", None), "id", None)
+        # NetBox refuses to reassign an IP while it is a device's primary — release
+        # the designation first ("Cannot reassign IP address while it is designated
+        # as the primary IP for the parent object")
+        if lose_primary_id is not None or getattr(lose, "primary_ip6", None) is not None:
+            nb.update(
+                lose,
+                {"primary_ip4": None, "primary_ip6": None},
+                reason="release primary IPs before merge",
+            )
         for ip in lose_ips:
             iface_name = None
             iface_id = getattr(ip, "assigned_object_id", None)

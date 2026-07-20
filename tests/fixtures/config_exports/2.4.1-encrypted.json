@@ -1,0 +1,21 @@
+{
+  "format": "netbox-monitor-config",
+  "format_version": 1,
+  "app_version": "2.4.1",
+  "config_schema": 2,
+  "encrypted": true,
+  "created_at": "2026-07-20T08:48:46Z",
+  "kdf": {
+    "name": "scrypt",
+    "n": 32768,
+    "r": 8,
+    "p": 1,
+    "length": 32,
+    "salt": "asAT2D8w19edwjRpYijU4w=="
+  },
+  "cipher": {
+    "name": "aes-256-gcm",
+    "nonce": "J2IDYFFbOKkDJe7m"
+  },
+  "ciphertext": "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"
+}

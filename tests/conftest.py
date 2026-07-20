@@ -35,6 +35,17 @@ class FakeRecord:
             self.tags = self._endpoint.api._resolve_tags(data.pop("tags"))
         if "custom_fields" in data:
             self.custom_fields = {**self.custom_fields, **data.pop("custom_fields")}
+        if self._endpoint.name == "ip-addresses" and "assigned_object_id" in data:
+            # real NetBox refuses this with a 400; mirror it so the constraint is
+            # exercised in tests ("Cannot reassign IP address while it is
+            # designated as the primary IP for the parent object")
+            for device in self._endpoint.api.dcim.devices.items:
+                primary = getattr(device, "primary_ip4", None)
+                if primary is not None and getattr(primary, "id", None) == self.id:
+                    raise RuntimeError(
+                        "Cannot reassign IP address while it is designated as the "
+                        "primary IP for the parent object"
+                    )
         for key, value in data.items():
             setattr(self, key, value)
         return True
