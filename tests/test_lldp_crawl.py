@@ -354,3 +354,25 @@ def test_mgmt_ip_fallback_prevents_a_new_duplicate(ctx):
     }
     run_lldp(ctx, topo)
     assert len(nb.api.dcim.devices.items) == before  # matched, not re-created
+
+
+def test_placeholder_macs_never_merge_two_switches(ctx):
+    """The live 2.4.1 regression: RouterOS reports 00:00:00:00:00:00 on loopbacks,
+    so two different switches both 'carry' it. A placeholder MAC is not an
+    identity and must never trigger a merge."""
+    nb = ctx.netbox
+    sw_a = seed_switch(nb, "sw-a", "10.0.0.1")
+    sw_b = seed_switch(nb, "sw-b", "10.0.0.2")
+
+    topo = {"10.0.0.1": [], "10.0.0.2": []}
+    zeros = {
+        "10.0.0.1": {"00:00:00:00:00:00": "lo", "AA:BB:CC:00:00:01": "bridge"},
+        "10.0.0.2": {"00:00:00:00:00:00": "lo", "AA:BB:CC:00:00:02": "bridge"},
+    }
+    run_lldp(ctx, topo, local_macs=zeros)
+
+    assert nb.api.dcim.devices.get(sw_a.id) is not None
+    assert nb.api.dcim.devices.get(sw_b.id) is not None  # both survive
+    # and the placeholder was never recorded as anyone's identity
+    recorded = {m.mac_address for m in nb.api.dcim.mac_addresses.items}
+    assert "00:00:00:00:00:00" not in recorded

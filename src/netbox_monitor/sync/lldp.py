@@ -77,6 +77,15 @@ class CrawlTarget:
     last_error: str | None = None  # why every driver/credential failed, for the status line
 
 
+# never treat these as a chassis identity: RouterOS loopbacks report all-zeros,
+# and matching on a placeholder merges two different switches into one
+_NON_IDENTITY_MACS = {"00:00:00:00:00:00", "FF:FF:FF:FF:FF:FF"}
+
+
+def _is_identity_mac(mac: str | None) -> bool:
+    return bool(mac) and mac not in _NON_IDENTITY_MACS
+
+
 @dataclass
 class SiteStats:
     polled: int = 0
@@ -593,10 +602,11 @@ class LldpSync:
         """
         nb = self.ctx.netbox
         identity: dict[str, str | None] = {}
-        if chassis_mac:
+        if _is_identity_mac(chassis_mac):
             identity[chassis_mac] = None
         for mac, ifname in list(local_macs.items())[:16]:
-            identity.setdefault(mac, ifname)
+            if _is_identity_mac(mac):
+                identity.setdefault(mac, ifname)
 
         for mac in identity:
             match = find_interface_by_mac(nb, mac)
