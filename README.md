@@ -143,7 +143,15 @@ Supported drivers: **Cisco** IOS/NX-OS, **Arista** EOS, **Aruba** (CX + ArubaOS-
 **MikroTik** RouterOS, **UniFi** (all over SSH), and **SNMP** LLDP-MIB for anything else
 with SNMP enabled. Discovered switches become NetBox devices (role **Switch**, tagged
 `src:lldp`) with their management IP; a working driver+credential is cached per switch so
-later runs skip the trial loop. Only neighbors matching a known switch vendor are crawled,
+later runs skip the trial loop.
+
+**One box, one device.** Each polled switch also reports its *own* MAC addresses
+(chassis/bridge/interface), which the crawl records on the device. A switch reachable at
+several management IPs — say a seed documented at one address while its LLDP TLVs
+advertise another — is recognised by those MACs and folded into a **single** device
+instead of being documented twice: the duplicate's IPs move onto the surviving device and
+the managed copy is deleted. Human-created devices always win a merge and are never
+deleted; if the duplicate holds any record the tool doesn't manage, the merge is refused. Only neighbors matching a known switch vendor are crawled,
 so hosts that merely advertise a bridge (e.g. Linux/Proxmox nodes) are never touched.
 
 Optional per-switch credentials: install the

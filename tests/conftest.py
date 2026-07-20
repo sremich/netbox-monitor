@@ -83,6 +83,12 @@ class FakeEndpoint:
             device = getattr(record, "device", None) or getattr(
                 getattr(record, "assigned_object", None), "device", None
             )
+            if device is None and (
+                str(getattr(record, "assigned_object_type", "")) == "dcim.interface"
+            ):
+                # real NetBox resolves an IP's device through its assigned interface
+                iface = self.api.dcim.interfaces.get(getattr(record, "assigned_object_id", 0))
+                device = getattr(iface, "device", None) if iface else None
             return device == value or getattr(device, "id", None) == value
         if key == "site_id":
             site = getattr(record, "site", None)

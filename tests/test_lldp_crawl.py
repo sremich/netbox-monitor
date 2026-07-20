@@ -44,8 +44,9 @@ def nbr(port, ip, mac, descr, caps=("bridge",), sysname=None):
     )
 
 
-def run_lldp(ctx, fake_topology, enable_crawl=True, max_switches=100):
-    """fake_topology: {host_ip: [LldpNeighbor,...]} returned by the collector."""
+def run_lldp(ctx, fake_topology, enable_crawl=True, max_switches=100, local_macs=None):
+    """fake_topology: {host_ip: [LldpNeighbor,...]} returned by the collector.
+    local_macs: {host_ip: {mac: ifname}} returned by the local-MAC collector."""
     ctx.config.lldp.crawl_enabled = enable_crawl
     ctx.config.lldp.max_switches = max_switches
     ctx.config.lldp.credentials = [
@@ -61,12 +62,18 @@ def run_lldp(ctx, fake_topology, enable_crawl=True, max_switches=100):
             return fake_topology[host]
         raise RuntimeError("unreachable")
 
+    async def fake_local_macs(driver, host, **kw):
+        return (local_macs or {}).get(host, {})
+
     orig = lldp_mod.registry.collect
+    orig_local = lldp_mod.registry.collect_local_macs
     lldp_mod.registry.collect = fake_collect
+    lldp_mod.registry.collect_local_macs = fake_local_macs
     try:
         asyncio.run(LldpSync(ctx).run())
     finally:
         lldp_mod.registry.collect = orig
+        lldp_mod.registry.collect_local_macs = orig_local
     return calls
 
 
@@ -216,3 +223,134 @@ def test_seed_at_unconfigured_site_is_reported(ctx, monkeypatch):
         for event, kw in rec.warnings
     )
     assert "10.9.9.9" not in [h for _d, h in calls]  # still not polled — only reported
+
+
+# ----------------------------------------------------------- switch de-dup
+
+
+CHASSIS = "08:55:31:89:4E:E4"
+
+
+def _lldp_duplicate(nb, name, ip, mac):
+    """A managed LLDP-created switch (the shape _ensure_switch_device produces)."""
+    dev = nb.api.dcim.devices.create(
+        name=name,
+        site=nb.home_site_id,
+        primary_ip4=None,
+        tags=nb.tag_ids("managed-netbox-monitor", "src-lldp"),
+    )
+    mgmt = nb.api.dcim.interfaces.create(device=dev.id, name="mgmt", type="other")
+    nb.api.dcim.mac_addresses.create(
+        mac_address=mac, assigned_object_type="dcim.interface", assigned_object_id=mgmt.id
+    )
+    ip_obj = nb.api.ipam.ip_addresses.create(
+        address=f"{ip}/32",
+        assigned_object_type="dcim.interface",
+        assigned_object_id=mgmt.id,
+        tags=nb.tag_ids("managed-netbox-monitor", "src-lldp"),
+    )
+    dev.primary_ip4 = SimpleNamespace(id=ip_obj.id, address=ip_obj.address)
+    return dev
+
+
+def test_merge_absorbs_managed_duplicate_into_human_seed(ctx):
+    """The CRS309 case: a human seed at one management IP, an LLDP-created copy of
+    the same box at another. Once the poll learns the seed's own MACs, the managed
+    copy is folded into the seed — never the other way around."""
+    nb = ctx.netbox
+    seed = seed_switch(nb, "mikrotik-crs309", "10.200.11.7")  # human: lldp-source only
+    dup = _lldp_duplicate(nb, "MikroTik", "10.200.1.7", CHASSIS)
+
+    run_lldp(
+        ctx,
+        {"10.200.11.7": []},
+        local_macs={"10.200.11.7": {CHASSIS: "bridge"}},
+    )
+
+    assert nb.api.dcim.devices.get(dup.id) is None  # managed duplicate absorbed
+    survivor = nb.api.dcim.devices.get(seed.id)
+    assert survivor is not None
+    assert [t.slug for t in survivor.tags] == ["lldp-source"]  # never tagged managed
+    # the duplicate's IP moved onto the seed rather than dying with it
+    moved = next(ip for ip in nb.api.ipam.ip_addresses.items if ip.address.startswith("10.200.1.7"))
+    dest_iface = nb.api.dcim.interfaces.get(moved.assigned_object_id)
+    assert getattr(dest_iface.device, "id", dest_iface.device) == seed.id
+    # and the seed keeps its own primary IP
+    assert str(seed.primary_ip4.address).startswith("10.200.11.7")
+
+
+def test_merge_records_macs_so_future_runs_match_directly(ctx):
+    from netbox_monitor.sync.common import find_interface_by_mac
+
+    nb = ctx.netbox
+    seed = seed_switch(nb, "sw-a", "10.0.0.1")
+    run_lldp(ctx, {"10.0.0.1": []}, local_macs={"10.0.0.1": {CHASSIS: None}})
+
+    match = find_interface_by_mac(nb, CHASSIS)
+    assert match is not None and match[0] == "dcim.interface"
+    parent = match[2]
+    assert getattr(parent, "id", parent) == seed.id
+
+
+def test_merge_refuses_when_neither_device_is_managed(ctx):
+    """Two human-created devices sharing a MAC are never touched."""
+    nb = ctx.netbox
+    seed = seed_switch(nb, "sw-a", "10.0.0.1")
+    other = nb.api.dcim.devices.create(
+        name="hand-made", site=nb.home_site_id, primary_ip4=None, tags=[]
+    )
+    iface = nb.api.dcim.interfaces.create(device=other.id, name="eth0", type="other")
+    nb.api.dcim.mac_addresses.create(
+        mac_address=CHASSIS, assigned_object_type="dcim.interface", assigned_object_id=iface.id
+    )
+
+    run_lldp(ctx, {"10.0.0.1": []}, local_macs={"10.0.0.1": {CHASSIS: None}})
+
+    assert nb.api.dcim.devices.get(seed.id) is not None
+    assert nb.api.dcim.devices.get(other.id) is not None  # both survive
+
+
+def test_merge_refuses_when_duplicate_holds_a_human_ip(ctx):
+    """Deleting the duplicate would silently unassign a human-owned IP record."""
+    nb = ctx.netbox
+    seed = seed_switch(nb, "sw-a", "10.0.0.1")
+    dup = _lldp_duplicate(nb, "copy", "10.0.0.9", CHASSIS)
+    # a human-created IP also hangs off the duplicate's mgmt interface
+    mgmt = next(i for i in nb.api.dcim.interfaces.items if i.device == dup.id)
+    nb.api.ipam.ip_addresses.create(
+        address="192.168.9.9/24",
+        assigned_object_type="dcim.interface",
+        assigned_object_id=mgmt.id,
+        tags=[],
+    )
+
+    run_lldp(ctx, {"10.0.0.1": []}, local_macs={"10.0.0.1": {CHASSIS: None}})
+
+    assert nb.api.dcim.devices.get(dup.id) is not None  # refused, both survive
+    assert nb.api.dcim.devices.get(seed.id) is not None
+
+
+def test_mgmt_ip_fallback_prevents_a_new_duplicate(ctx):
+    """A neighbor advertising a mgmt IP that already belongs to a device must be
+    matched to it, even with an unknown MAC and a different sysname."""
+    nb = ctx.netbox
+    seed_switch(nb, "sw-a", "10.0.0.1")
+    existing = seed_switch(nb, "known-switch", "10.0.0.50")
+    # give the existing switch an assigned IP record (what _device_by_ip resolves)
+    iface = nb.api.dcim.interfaces.create(device=existing.id, name="mgmt", type="other")
+    nb.api.ipam.ip_addresses.create(
+        address="10.0.0.50/24",
+        assigned_object_type="dcim.interface",
+        assigned_object_id=iface.id,
+        tags=[],
+    )
+
+    before = len(nb.api.dcim.devices.items)
+    topo = {
+        "10.0.0.1": [
+            nbr("e1", "10.0.0.50", "aa:bb:cc:00:00:50", "RouterOS CRS", sysname="other-name")
+        ],
+        "10.0.0.50": [],
+    }
+    run_lldp(ctx, topo)
+    assert len(nb.api.dcim.devices.items) == before  # matched, not re-created

@@ -197,9 +197,10 @@ class NetBoxClient:
         if self.dry_run:
             log.info("dry-run: would journal", obj=str(obj), comments=comments)
             return
-        object_type = self._JOURNAL_TYPES.get(getattr(obj.endpoint, "name", ""))
+        endpoint_name = getattr(getattr(obj, "endpoint", None), "name", "")
+        object_type = self._JOURNAL_TYPES.get(endpoint_name)
         if not object_type:
-            log.debug("no journal object type mapping", endpoint=getattr(obj.endpoint, "name", ""))
+            log.debug("no journal object type mapping", endpoint=endpoint_name)
             return
         try:
             with self.lock:

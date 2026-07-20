@@ -75,3 +75,19 @@ async def collect(host: str, username: str, password: str) -> list[LldpNeighbor]
             neighbors = parse_lldp_detail(text)
     log.info("aruba lldp neighbors collected", host=host, count=len(neighbors))
     return neighbors
+
+
+_BASE_MAC_LINE = re.compile(r"(?:Base|System)\s+MAC[^:]*[:=]\s*([0-9A-Fa-f:.\-]{12,17})", re.I)
+
+
+async def collect_local_macs(host: str, username: str, password: str) -> dict[str, str | None]:
+    """Base MAC from `show system` (works on both AOS-CX and ArubaOS-Switch)."""
+    async with await legacy_connect(host, username, password) as conn:
+        await run_command(conn, "no page", timeout=8)
+        output = await run_command(conn, "show system", timeout=12)
+    macs: dict[str, str | None] = {}
+    for match in _BASE_MAC_LINE.finditer(output):
+        mac = normalize_mac(match.group(1))
+        if mac:
+            macs.setdefault(mac, None)
+    return macs

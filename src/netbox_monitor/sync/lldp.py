@@ -28,7 +28,13 @@ from netbox_monitor.config import LldpCredential
 from netbox_monitor.context import Context, ResolvedSite
 from netbox_monitor.lldp import LldpNeighbor, registry
 from netbox_monitor.oui import normalize_mac
-from netbox_monitor.sync.common import ensure_discovered_device_type, now_iso, set_interface_mac
+from netbox_monitor.sync.common import (
+    ensure_discovered_device_type,
+    find_interface_by_mac,
+    find_ip,
+    now_iso,
+    set_interface_mac,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -243,6 +249,23 @@ class LldpSync:
                     stats.created += 1
             if device is None:
                 continue
+
+            # learn the switch's OWN MACs (its chassis identity) so a box reachable
+            # at several management IPs collapses into one device instead of many
+            local_macs: dict[str, str | None] = {}
+            if cred is not None:
+                local_macs = await registry.collect_local_macs(
+                    driver,
+                    target.host,
+                    username=cred.username,
+                    password=cred.password,
+                    snmp_community=cred.snmp_community,
+                )
+            device, identity_macs = await asyncio.to_thread(
+                self._dedup_and_record_macs, device, target.chassis_mac, local_macs
+            )
+            visited_mac |= identity_macs
+
             await asyncio.to_thread(self._reconcile, site, device, neighbors)
 
             if not cfg.crawl_enabled or target.depth >= cfg.max_depth:
@@ -457,6 +480,25 @@ class LldpSync:
         vendor = self.ctx.oui.lookup(chassis_mac) if chassis_mac else None
         return vendor or "Unknown"
 
+    @staticmethod
+    def _device_by_ip(nb: NetBoxClient, ip: str) -> Any | None:
+        """The device owning ``ip`` via its assigned interface, if any."""
+        ip_obj = find_ip(nb, ip)
+        if ip_obj is None:
+            return None
+        if str(getattr(ip_obj, "assigned_object_type", "") or "") != "dcim.interface":
+            return None  # unassigned, or a VM's — a switch match must be a device
+        iface_id = getattr(ip_obj, "assigned_object_id", None)
+        if not iface_id:
+            return None
+        with nb.lock:
+            iface = nb.api.dcim.interfaces.get(iface_id)
+        parent = getattr(iface, "device", None) if iface else None
+        if parent is None:
+            return None
+        with nb.lock:
+            return nb.api.dcim.devices.get(getattr(parent, "id", parent))
+
     def _ensure_switch_device(
         self,
         site: ResolvedSite,
@@ -466,21 +508,22 @@ class LldpSync:
         sysname: str | None,
     ) -> Any | None:
         nb = self.ctx.netbox
-        # match existing: by chassis MAC interface, then sysname, then mgmt IP
+        # match existing: by chassis MAC, then sysname, then mgmt IP
         device = None
         if chassis_mac:
-            with nb.lock:
-                ifaces = list(nb.api.dcim.interfaces.filter(mac_address=chassis_mac))
-            for iface in ifaces:
-                if iface.device:
-                    with nb.lock:
-                        device = nb.api.dcim.devices.get(iface.device.id)
-                    break
+            # find_interface_by_mac reads dcim.mac_addresses — under NetBox >= 4.2
+            # interfaces no longer answer a mac_address filter directly
+            match = find_interface_by_mac(nb, chassis_mac)
+            if match and match[0] == "dcim.interface" and match[2] is not None:
+                with nb.lock:
+                    device = nb.api.dcim.devices.get(getattr(match[2], "id", match[2]))
         if device is None and sysname:
             short = sysname.split(".")[0]
             with nb.lock:
                 matches = list(nb.api.dcim.devices.filter(name__ie=short))
             device = matches[0] if matches else None
+        if device is None and mgmt_ip:
+            device = self._device_by_ip(nb, mgmt_ip)
         if device is not None:
             return device
 
@@ -533,6 +576,132 @@ class LldpSync:
             if ip_obj is not None and getattr(device, "primary_ip4", None) is None:
                 nb.update(device, {"primary_ip4": ip_obj.id}, reason="set switch primary IP")
         return device
+
+    # ----------------------------------------------------------------- dedup
+
+    def _dedup_and_record_macs(
+        self, device: Any, chassis_mac: str | None, local_macs: dict[str, str | None]
+    ) -> tuple[Any, set[str]]:
+        """Fold duplicates of ``device`` into one record, then store its own MACs.
+
+        A switch reachable at two management IPs gets documented twice (discovery
+        or a seed on one IP, the crawl on another). Its own MACs are the identity
+        that ties the copies together: any *other* device already carrying one of
+        them is the same physical box. Returns the surviving device plus the MAC
+        set (the caller adds it to visited_mac so the crawl doesn't re-poll this
+        chassis through its other addresses).
+        """
+        nb = self.ctx.netbox
+        identity: dict[str, str | None] = {}
+        if chassis_mac:
+            identity[chassis_mac] = None
+        for mac, ifname in list(local_macs.items())[:16]:
+            identity.setdefault(mac, ifname)
+
+        for mac in identity:
+            match = find_interface_by_mac(nb, mac)
+            if not match or match[0] != "dcim.interface" or match[2] is None:
+                continue
+            other_id = getattr(match[2], "id", match[2])
+            if other_id is None or other_id == device.id:
+                continue
+            with nb.lock:
+                other = nb.api.dcim.devices.get(other_id)
+            if other is None or other.id == device.id:
+                continue
+            device = self._merge_duplicate(device, other, mac)
+            break
+
+        self._record_local_macs(device, identity)
+        return device, set(identity)
+
+    def _merge_duplicate(self, polled: Any, other: Any, mac: str) -> Any:
+        """Merge two devices that are the same physical switch; return the keeper.
+
+        Ownership decides direction: a human-created device always wins and only a
+        managed duplicate is ever deleted (``delete_if_managed`` enforces this even
+        if the direction logic were wrong). The loser's managed IPs move onto
+        same-named interfaces of the keeper; its interfaces/cables cascade away
+        with it and the next crawl redraws them on the keeper.
+        """
+        nb = self.ctx.netbox
+        polled_managed = nb.is_managed(polled)
+        other_managed = nb.is_managed(other)
+        if polled_managed and not other_managed:
+            keep, lose = other, polled
+        elif other_managed and not polled_managed:
+            keep, lose = polled, other
+        elif polled_managed and other_managed:
+            # both ours: prefer a human-tagged seed, else the one answering right now
+            seed = "lldp-source" in nb.obj_tag_slugs(other)
+            keep, lose = (other, polled) if seed else (polled, other)
+        else:
+            log.warning(
+                "same switch documented twice but neither device is managed; not merging",
+                a=polled.name,
+                b=other.name,
+                mac=mac,
+            )
+            return polled
+
+        with nb.lock:
+            lose_ips = list(nb.api.ipam.ip_addresses.filter(device_id=lose.id))
+        if any(MANAGED_TAG_SLUG not in nb.obj_tag_slugs(ip) for ip in lose_ips):
+            # a human-owned IP record hangs off the duplicate; deleting it would
+            # silently unassign that record. Leave both devices alone.
+            log.warning(
+                "duplicate switch holds an IP we don't manage; not merging",
+                device=lose.name,
+            )
+            return polled
+
+        log.info(
+            "merging duplicate switch",
+            keep=keep.name,
+            absorb=lose.name,
+            matched_mac=mac,
+        )
+        lose_primary_id = getattr(getattr(lose, "primary_ip4", None), "id", None)
+        for ip in lose_ips:
+            iface_name = None
+            iface_id = getattr(ip, "assigned_object_id", None)
+            if iface_id:
+                with nb.lock:
+                    src_iface = nb.api.dcim.interfaces.get(iface_id)
+                iface_name = getattr(src_iface, "name", None) if src_iface else None
+            dest = self._local_interface(nb, keep, iface_name or "mgmt")
+            if dest is None:
+                continue
+            nb.update(
+                ip,
+                {"assigned_object_type": "dcim.interface", "assigned_object_id": dest.id},
+                reason="merge duplicate switch",
+            )
+            if ip.id == lose_primary_id and getattr(keep, "primary_ip4", None) is None:
+                nb.update(keep, {"primary_ip4": ip.id}, reason="primary IP from merged duplicate")
+        nb.journal(keep, f"Merged duplicate device '{lose.name}' (same chassis, MAC {mac})")
+        if not nb.delete_if_managed(lose):
+            return polled  # dry-run, or the guard refused — nothing was changed
+        with nb.lock:
+            refreshed = nb.api.dcim.devices.get(keep.id)
+        return refreshed or keep
+
+    def _record_local_macs(self, device: Any, identity: dict[str, str | None]) -> None:
+        """Store the switch's own MACs on its interfaces, so later crawls (and the
+        cross-module MAC matching) recognise this chassis at any of its IPs."""
+        nb = self.ctx.netbox
+        mgmt = None
+        for mac, ifname in identity.items():
+            iface = None
+            if ifname:
+                with nb.lock:
+                    iface = nb.api.dcim.interfaces.get(device_id=device.id, name=ifname)
+            if iface is None:
+                if mgmt is None:
+                    mgmt = self._local_interface(nb, device, "mgmt")
+                iface = mgmt
+            if iface is not None:
+                set_interface_mac(nb, iface, mac)
 
     # ------------------------------------------------------------- reconcile
 
@@ -595,12 +764,10 @@ class LldpSync:
                 if matches:
                     return matches[0]
         if neighbor.chassis_mac:
-            with nb.lock:
-                ifaces = list(nb.api.dcim.interfaces.filter(mac_address=neighbor.chassis_mac))
-            for iface in ifaces:
-                if iface.device:
-                    with nb.lock:
-                        return nb.api.dcim.devices.get(iface.device.id)
+            match = find_interface_by_mac(nb, neighbor.chassis_mac)
+            if match and match[0] == "dcim.interface" and match[2] is not None:
+                with nb.lock:
+                    return nb.api.dcim.devices.get(getattr(match[2], "id", match[2]))
         if neighbor.mgmt_ip:
             with nb.lock:
                 ips = list(nb.api.ipam.ip_addresses.filter(address=neighbor.mgmt_ip))

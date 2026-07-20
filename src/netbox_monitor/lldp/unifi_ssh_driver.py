@@ -5,6 +5,7 @@ parse ``lldpcli show neighbors -f json``.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import asyncssh
@@ -126,3 +127,29 @@ async def collect(host: str, username: str, password: str) -> list[LldpNeighbor]
                 return neighbors
             last_error = (result.stderr or stdout or "").strip()[:200]
         raise RuntimeError(f"no lldp output from {host}: {last_error}")
+
+
+def parse_ip_link(output: str) -> dict[str, str | None]:
+    """MAC -> interface name pairs from busybox/iproute2 `ip link` output."""
+    macs: dict[str, str | None] = {}
+    current: str | None = None
+    for line in output.splitlines():
+        head = re.match(r"^\d+:\s+([^:@\s]+)", line)
+        if head:
+            current = head.group(1)
+            continue
+        ether = re.search(r"link/ether\s+([0-9A-Fa-f:]{17})", line)
+        if ether:
+            mac = normalize_mac(ether.group(1))
+            if mac:
+                macs.setdefault(mac, current)
+    return macs
+
+
+async def collect_local_macs(host: str, username: str, password: str) -> dict[str, str | None]:
+    """The device's own interface MACs (br0 carries the LLDP chassis id)."""
+    async with asyncssh.connect(
+        host, username=username, password=password, known_hosts=None, connect_timeout=10
+    ) as conn:
+        result = await conn.run("ip link", check=False)
+    return parse_ip_link(result.stdout or "")

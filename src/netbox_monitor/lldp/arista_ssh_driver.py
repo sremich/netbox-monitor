@@ -7,6 +7,7 @@ text parser if JSON isn't available on the box.
 from __future__ import annotations
 
 import json
+import re
 
 import structlog
 
@@ -71,3 +72,17 @@ async def collect(host: str, username: str, password: str) -> list[LldpNeighbor]
             neighbors = parse_lldp_detail(text)
     log.info("arista lldp neighbors collected", host=host, count=len(neighbors))
     return neighbors
+
+
+async def collect_local_macs(host: str, username: str, password: str) -> dict[str, str | None]:
+    """EOS advertises its chassis id in `show lldp local-info`."""
+    async with await legacy_connect(host, username, password) as conn:
+        output = await run_command(conn, "show lldp local-info | json")
+        try:
+            chassis = json.loads(output).get("chassisId", "")
+        except json.JSONDecodeError:
+            text = await run_command(conn, "show lldp local-info")
+            found = re.search(r"Chassis ID\s*[:=]\s*(\S+)", text, re.I)
+            chassis = found.group(1) if found else ""
+    mac = normalize_mac(chassis)
+    return {mac: None} if mac else {}

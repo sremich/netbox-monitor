@@ -195,3 +195,53 @@ def test_vendor_signature_gate():
         sysname="sw",
     )
     assert sw.is_crawlable_switch() is True
+
+
+# ------------------------------------------------- local MAC collection (2.4)
+
+
+def test_mikrotik_interface_terse_parses_macs_with_names():
+    from netbox_monitor.lldp.mikrotik_ssh_driver import parse_interface_terse
+
+    output = (
+        " 0 R  name=bridge default-name=bridge type=bridge mtu=1500 "
+        "mac-address=08:55:31:89:4E:E4\n"
+        " 1 RS name=sfp-sfpplus2 type=ether mtu=1500 mac-address=08:55:31:89:4E:E6\n"
+        " 2    name=lo type=loopback mtu=65536\n"  # no MAC -> skipped
+    )
+    macs = parse_interface_terse(output)
+    assert macs == {
+        "08:55:31:89:4E:E4": "bridge",
+        "08:55:31:89:4E:E6": "sfp-sfpplus2",
+    }
+
+
+def test_cisco_show_version_base_mac():
+    from netbox_monitor.lldp.cisco_ssh_driver import parse_base_mac
+
+    output = (
+        "Cisco IOS Software, C2960X Software ...\n"
+        "Base ethernet MAC Address       : 00:1E:14:AA:BB:CC\n"
+    )
+    assert parse_base_mac(output) == {"00:1E:14:AA:BB:CC": None}
+    # dotted Cisco format normalizes too
+    assert parse_base_mac("Base Ethernet MAC Address: 001e.14aa.bbcc\n") == {
+        "00:1E:14:AA:BB:CC": None
+    }
+
+
+def test_unifi_ip_link_parses_interface_macs():
+    from netbox_monitor.lldp.unifi_ssh_driver import parse_ip_link
+
+    output = (
+        "1: lo: <LOOPBACK,UP> mtu 65536\n"
+        "    link/loopback 00:00:00:00:00:00\n"
+        "2: br0: <BROADCAST,MULTICAST,UP> mtu 1500\n"
+        "    link/ether 1C:0B:8B:16:79:66 brd ff:ff:ff:ff:ff:ff\n"
+        "3: eth0@br0: <BROADCAST> mtu 1500\n"
+        "    link/ether 1C:0B:8B:16:79:67 brd ff:ff:ff:ff:ff:ff\n"
+    )
+    macs = parse_ip_link(output)
+    assert macs["1C:0B:8B:16:79:66"] == "br0"
+    assert macs["1C:0B:8B:16:79:67"] == "eth0"
+    assert "00:00:00:00:00:00" not in macs  # loopback has no link/ether line

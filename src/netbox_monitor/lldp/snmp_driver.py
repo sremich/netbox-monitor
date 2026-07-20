@@ -131,10 +131,33 @@ def _close_engine(engine) -> None:
             pass
 
 
+OID_LOC_CHASSIS_SUBTYPE = "1.0.8802.1.1.2.1.3.1"  # lldpLocChassisIdSubtype
+OID_LOC_CHASSIS_ID = "1.0.8802.1.1.2.1.3.2"  # lldpLocChassisId
+
+
 async def collect(host: str, community: str) -> list[LldpNeighbor]:
     engine = SnmpEngine()
     try:
         return await _collect(engine, host, community)
+    finally:
+        _close_engine(engine)
+
+
+async def collect_local_macs(host: str, community: str) -> dict[str, str | None]:
+    """The switch's own LLDP chassis id (lldpLocChassisId), when it is a MAC."""
+    engine = SnmpEngine()
+    try:
+        subtype_rows = await _walk(engine, host, community, OID_LOC_CHASSIS_SUBTYPE)
+        id_rows = await _walk(engine, host, community, OID_LOC_CHASSIS_ID)
+        if not id_rows:
+            return {}
+        subtype = int(subtype_rows[0][1]) if subtype_rows else MAC_SUBTYPE
+        raw = id_rows[0][1]
+        mac = normalize_mac(_decode(raw, as_mac_if_binary=subtype == MAC_SUBTYPE))
+        if not mac:
+            # some switches (Cisco Small Business) report the MAC as a text string
+            mac = normalize_mac(_decode(raw))
+        return {mac: None} if mac else {}
     finally:
         _close_engine(engine)
 

@@ -4,6 +4,7 @@ through one unified call.
 
 from __future__ import annotations
 
+import asyncio
 import re
 
 import structlog
@@ -49,6 +50,15 @@ def select_driver(platform_slug: str | None, sys_descr: str | None = None) -> st
 AUTO_ORDER = ["mikrotik", "cisco", "arista", "aruba", "unifi", "snmp"]
 
 
+_SSH_MODULES = {
+    "cisco": cisco_ssh_driver,
+    "arista": arista_ssh_driver,
+    "aruba": aruba_ssh_driver,
+    "mikrotik": mikrotik_ssh_driver,
+    "unifi": unifi_ssh_driver,
+}
+
+
 async def collect(
     driver: str,
     host: str,
@@ -61,16 +71,40 @@ async def collect(
     if driver in SSH_DRIVERS:
         if not username or not password:
             raise ValueError(f"driver '{driver}' needs an SSH username/password")
-        module = {
-            "cisco": cisco_ssh_driver,
-            "arista": arista_ssh_driver,
-            "aruba": aruba_ssh_driver,
-            "mikrotik": mikrotik_ssh_driver,
-            "unifi": unifi_ssh_driver,
-        }[driver]
-        return await module.collect(host, username, password)
+        return await _SSH_MODULES[driver].collect(host, username, password)
     if driver == "snmp":
         if not snmp_community:
             raise ValueError("driver 'snmp' needs a community string")
         return await snmp_driver.collect(host, snmp_community)
     raise ValueError(f"unknown LLDP driver '{driver}'")
+
+
+async def collect_local_macs(
+    driver: str,
+    host: str,
+    *,
+    username: str = "",
+    password: str = "",
+    snmp_community: str = "",
+) -> dict[str, str | None]:
+    """The polled switch's OWN MAC addresses (chassis/bridge/interface), mapped to
+    an interface name where the driver knows one.
+
+    LLDP neighbor tables only carry *remote* chassis ids, so a directly-polled
+    switch never learns its own — which is what lets the same physical box get
+    documented twice under two management IPs. Best-effort by design: an
+    unsupported driver or any failure returns {} and the crawl carries on.
+    """
+    try:
+        if driver in SSH_DRIVERS:
+            fn = getattr(_SSH_MODULES[driver], "collect_local_macs", None)
+            if fn is None:
+                return {}
+            return await asyncio.wait_for(fn(host, username, password), timeout=25)
+        if driver == "snmp":
+            return await asyncio.wait_for(
+                snmp_driver.collect_local_macs(host, snmp_community), timeout=25
+            )
+    except Exception as exc:
+        log.debug("local MAC collection failed", host=host, driver=driver, error=str(exc))
+    return {}

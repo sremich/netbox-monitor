@@ -63,3 +63,34 @@ async def collect(host: str, username: str, password: str) -> list[LldpNeighbor]
     neighbors = parse_ip_neighbor(output)
     log.info("mikrotik lldp neighbors collected", host=host, count=len(neighbors))
     return neighbors
+
+
+# one terse line per interface: `0 R  name=bridge type=bridge ... mac-address=AA:BB:..`
+_TERSE_NAME = re.compile(r"\bname=(\S+)")
+_TERSE_MAC = re.compile(r"\bmac-address=([0-9A-Fa-f:]{17})")
+
+
+def parse_interface_terse(output: str) -> dict[str, str | None]:
+    """MAC -> interface name for every interface in ``/interface print terse``.
+
+    Includes the bridge MAC, which is what RouterOS advertises as its LLDP
+    chassis id — the key that lets the crawl recognise this box elsewhere.
+    """
+    macs: dict[str, str | None] = {}
+    for line in output.splitlines():
+        mac_match = _TERSE_MAC.search(line)
+        if not mac_match:
+            continue
+        mac = normalize_mac(mac_match.group(1))
+        if not mac:
+            continue
+        name_match = _TERSE_NAME.search(line)
+        macs.setdefault(mac, name_match.group(1) if name_match else None)
+    return macs
+
+
+async def collect_local_macs(host: str, username: str, password: str) -> dict[str, str | None]:
+    """The switch's own interface MACs (chassis identity for dedup)."""
+    async with await legacy_connect(host, username, password) as conn:
+        output = await run_command(conn, "/interface print terse")
+    return parse_interface_terse(output)

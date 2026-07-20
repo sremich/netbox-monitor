@@ -116,3 +116,25 @@ async def collect(host: str, username: str, password: str) -> list[LldpNeighbor]
     neighbors = parse_lldp_detail(output)
     log.info("cisco-style lldp neighbors collected", host=host, count=len(neighbors))
     return neighbors
+
+
+# "Base ethernet MAC Address       : 00:1e:14:xx:xx:xx" (IOS switches) and
+# similar "... MAC Address" lines on IOS-XE/NX-OS `show version`
+_BASE_MAC_LINE = re.compile(r"MAC\s+Address\s*[:=]?\s*([0-9A-Fa-f:.\-]{12,17})", re.I)
+
+
+def parse_base_mac(output: str) -> dict[str, str | None]:
+    macs: dict[str, str | None] = {}
+    for match in _BASE_MAC_LINE.finditer(output):
+        mac = normalize_mac(match.group(1))
+        if mac:
+            macs.setdefault(mac, None)
+    return macs
+
+
+async def collect_local_macs(host: str, username: str, password: str) -> dict[str, str | None]:
+    """The switch's own base MAC (its usual LLDP chassis id), from `show version`."""
+    async with await legacy_connect(host, username, password) as conn:
+        await run_command(conn, "terminal length 0", timeout=6)
+        output = await run_command(conn, "show version", timeout=12)
+    return parse_base_mac(output)

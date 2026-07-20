@@ -39,12 +39,18 @@ def capture_collect(ctx):
         calls.append((driver, host, kw))
         return []
 
+    async def fake_local_macs(driver, host, **kw):
+        return {}
+
     orig = lldp_mod.registry.collect
+    orig_local = lldp_mod.registry.collect_local_macs
     lldp_mod.registry.collect = fake_collect
+    lldp_mod.registry.collect_local_macs = fake_local_macs
     try:
         asyncio.run(LldpSync(ctx).run())
     finally:
         lldp_mod.registry.collect = orig
+        lldp_mod.registry.collect_local_macs = orig_local
     return calls
 
 
