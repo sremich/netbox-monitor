@@ -18,6 +18,8 @@ Everything the service creates is tagged `managed:netbox-monitor` plus a source 
 (`src:dhcp`, `src:scan`, `src:proxmox`, `src:lldp`). **It never deletes or lifecycle-edits
 records that don't carry its tags** — your hand-curated documentation is safe.
 
+See [CHANGELOG.md](CHANGELOG.md) for the complete release history (v2.0.0 onwards).
+
 ## Web UI (v2)
 
 v2 ships a built-in web UI at **http://\<host\>:8899**:
@@ -30,6 +32,8 @@ v2 ships a built-in web UI at **http://\<host\>:8899**:
   instance**, **Proxmox instances**, and **discovery scanning scope** (prefix pickers
   populated live from NetBox). Every section has a Test button.
 - **Dashboard**: per-module / per-site last-run status and **Run now** buttons.
+- **Cleanup**: bulk-delete managed objects by site/source/staleness, with preview
+  and explicit confirm; human-created objects are never touched.
 - **Backup**: export/import the whole configuration, encrypted or redacted (see
   [Backup & restore](#backup--restore--moving-to-another-host)).
 - **`/healthz`**: unauthenticated liveness JSON (version, schema, whether it's
@@ -150,9 +154,13 @@ later runs skip the trial loop.
 several management IPs — say a seed documented at one address while its LLDP TLVs
 advertise another — is recognised by those MACs and folded into a **single** device
 instead of being documented twice: the duplicate's IPs move onto the surviving device and
-the managed copy is deleted. Human-created devices always win a merge and are never
-deleted; if the duplicate holds any record the tool doesn't manage, the merge is refused. Only neighbors matching a known switch vendor are crawled,
-so hosts that merely advertise a bridge (e.g. Linux/Proxmox nodes) are never touched.
+the managed copy is deleted. Placeholder MACs (all-zeros `00:00:00:00:00:00` and all-FF
+`FF:FF:FF:FF:FF:FF`) are never recorded and never matched — some platforms report these
+on loopback or bridge interfaces and matching them would merge distinct switches.
+Human-created devices always win a merge and are never deleted; if the duplicate holds any
+record the tool doesn't manage, the merge is refused. Only neighbors matching a known
+switch vendor are crawled, so hosts that merely advertise a bridge (e.g. Linux/Proxmox
+nodes) are never touched.
 
 Optional per-switch credentials: install the
 [netbox-secrets](https://github.com/Onemind-Services-LLC/netbox-secrets) plugin, point
@@ -214,8 +222,8 @@ The **Backup** page exports this instance's whole configuration — sites, NetBo
 Technitium / Proxmox tokens, switch credentials, module settings — as a single JSON
 file, and imports it back. Two modes:
 
-- **Encrypted** (passphrase) — contains every credential. This is the one to use for
-  a real backup or to move a setup to another host.
+- **Encrypted** (passphrase, minimum 12 characters) — contains every credential. This
+  is the one to use for a real backup or to move a setup to another host.
 - **Redacted** (no passphrase) — every secret replaced by `__REDACTED__`. Safe to
   diff, keep in git, or attach to a bug report. Importing it **keeps the secrets the
   target already has** rather than blanking them; anything it can't match is left

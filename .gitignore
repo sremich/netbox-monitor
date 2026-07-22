@@ -13,3 +13,6 @@ build/
 *.db
 *.log
 docker-compose.override.yml
+
+# machine-local agent handover context (lives in OneDrive, never in git)
+HANDOVER.md
