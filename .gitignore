@@ -16,3 +16,6 @@ docker-compose.override.yml
 
 # machine-local agent handover context (lives in OneDrive, never in git)
 HANDOVER.md
+
+# project working notes for agents (roams via OneDrive, never tracked)
+CLAUDE.md
